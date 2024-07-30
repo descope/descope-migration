@@ -420,6 +420,13 @@ def migrate_firebase(dry_run,verbose):
         print(
             f"Created users within Descope {len(successful_migrated_users) - merged_users}"
         )
+    else:
+        print("=================== User Migration =============================")
+        print(f"Firebase Users found via Admin SDK {len(firebase_users)}")
+        if verbose:
+            for user in firebase_users:
+                print(f"\tUser: {user['_data']['localId']}")
+        
 
 ### End Main Migration Function
 

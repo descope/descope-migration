@@ -863,6 +863,7 @@ def migrate_auth0(dry_run,verbose,passwords_file_path,json_file_path):
     """
     Main function to process Auth0 users, roles, permissions, and organizations, creating and mapping them together within your Descope project.
     """
+    from_json=False
     if passwords_file_path:
         print(f"Running with passwords from file: {passwords_file_path}")
         found_password_users, successful_password_users, failed_password_users = process_users_with_passwords(passwords_file_path, dry_run, verbose)
