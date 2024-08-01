@@ -31,10 +31,10 @@ pip3 install -r requirements.txt
 ```
 
 4. Follow the guide for your specfic third-party 
-    - Auth0 LINK
-    - Aws LINK
-    - Cognito LINK
-    - If you're using a Custom data store please follow this guide instead LINK
+    - [Auth0](https://docs.descope.com/migrate/auth0)
+    - [AWS Cognito](https://docs.descope.com/migrate/cognito)
+    - [Firebase](https://docs.descope.com/migrate/firebase)
+    - If you're using a Custom data store please follow this guide instead [Custom Data Store](https://docs.descope.com/migrate/custom)
 
 ## Running the Migration Script 🚀
 
@@ -57,9 +57,9 @@ python3 src/main.py auth0
 #### Guides for each provider 
 
 Pick the third-party you are migrating from and follow the corrosponding guide
-- LINK to AUTH0 GUIDE
-- LINK to AWS COGNITO GUIDE
-- LINK TO FIREBASE GUIDE 
+- [Auth0](https://docs.descope.com/migrate/auth0)
+- [AWS Cognito](https://docs.descope.com/migrate/cognito)
+- [Firebase](https://docs.descope.com/migrate/firebase)
 
 ### Dry Run vs Live Run
 
