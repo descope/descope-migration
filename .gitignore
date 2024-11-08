@@ -11,3 +11,5 @@ __pycache__/
 # ignore everything in creds and logs
 creds/*
 logs/*
+
+.env
