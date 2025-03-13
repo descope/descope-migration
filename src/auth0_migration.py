@@ -25,6 +25,10 @@ from utils import (
 load_dotenv()
 AUTH0_TOKEN = os.getenv("AUTH0_TOKEN")
 AUTH0_TENANT_ID = os.getenv("AUTH0_TENANT_ID")
+AUTH0_REGION = os.getenv("AUTH0_REGION", "us")  # Default to 'us' if not specified
+
+# Update the Auth0 domain construction to use the region
+AUTH0_DOMAIN = f"https://{AUTH0_TENANT_ID}.{AUTH0_REGION}.auth0.com"
 
 descope_client = initialize_descope()
 
@@ -51,7 +55,7 @@ def fetch_auth0_users_from_file(file_path):
         while True:
             response = api_request_with_retry(
                 "get",
-                f"https://{AUTH0_TENANT_ID}.us.auth0.com/api/v2/users?page={page}&per_page={per_page}&q=user_id:\"{user['user_id']}\"",
+                f"https://{AUTH0_TENANT_ID}.{AUTH0_REGION}.auth0.com/api/v2/users?page={page}&per_page={per_page}&q=user_id:\"{user['user_id']}\"",
                 headers=headers,
             )
             if response.status_code != 200:
@@ -78,7 +82,7 @@ def fetch_auth0_users():
     while True:
         response = api_request_with_retry(
             "get",
-            f"https://{AUTH0_TENANT_ID}.us.auth0.com/api/v2/users?page={page}&per_page={per_page}",
+            f"https://{AUTH0_TENANT_ID}.{AUTH0_REGION}.auth0.com/api/v2/users?page={page}&per_page={per_page}",
             headers=headers,
         )
         if response.status_code != 200:
@@ -108,7 +112,7 @@ def fetch_auth0_roles():
     while True:
         response = api_request_with_retry(
             "get",
-            f"https://{AUTH0_TENANT_ID}.us.auth0.com/api/v2/roles?page={page}&per_page={per_page}",
+            f"https://{AUTH0_TENANT_ID}.{AUTH0_REGION}.auth0.com/api/v2/roles?page={page}&per_page={per_page}",
             headers=headers,
         )
         if response.status_code != 200:
@@ -139,7 +143,7 @@ def get_users_in_role(role):
     while True:
         response = api_request_with_retry(
             "get",
-            f"https://{AUTH0_TENANT_ID}.us.auth0.com/api/v2/roles/{role}/users?page={page}&per_page={per_page}",
+            f"https://{AUTH0_TENANT_ID}.{AUTH0_REGION}.auth0.com/api/v2/roles/{role}/users?page={page}&per_page={per_page}",
             headers=headers,
         )
         if response.status_code != 200:
@@ -172,7 +176,7 @@ def get_permissions_for_role(role):
     while True:
         response = api_request_with_retry(
             "get",
-            f"https://{AUTH0_TENANT_ID}.us.auth0.com/api/v2/roles/{role}/permissions?per_page={per_page}&page={page}",
+            f"https://{AUTH0_TENANT_ID}.{AUTH0_REGION}.auth0.com/api/v2/roles/{role}/permissions?per_page={per_page}&page={page}",
             headers=headers,
         )
         if response.status_code != 200:
@@ -203,7 +207,7 @@ def fetch_auth0_organizations():
     while True:
         response = api_request_with_retry(
             "get",
-            f"https://{AUTH0_TENANT_ID}.us.auth0.com/api/v2/organizations?per_page={per_page}&page={page}",
+            f"https://{AUTH0_TENANT_ID}.{AUTH0_REGION}.auth0.com/api/v2/organizations?per_page={per_page}&page={page}",
             headers=headers,
         )
         if response.status_code != 200:
@@ -236,7 +240,7 @@ def fetch_auth0_organization_members(organization):
     while True:
         response = api_request_with_retry(
             "get",
-            f"https://{AUTH0_TENANT_ID}.us.auth0.com/api/v2/organizations/{organization}/members?per_page={per_page}&page={page}",
+            f"https://{AUTH0_TENANT_ID}.{AUTH0_REGION}.auth0.com/api/v2/organizations/{organization}/members?per_page={per_page}&page={page}",
             headers=headers,
         )
         if response.status_code != 200:
