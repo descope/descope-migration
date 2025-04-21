@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 import logging
 import bcrypt
 import sys
+import time
 
 from setup import initialize_descope
 
@@ -19,6 +20,7 @@ from descope import (
     UserPassword,
     UserPasswordFirebase,
     UserObj,
+    RateLimitException
 )
 
 import firebase_admin
@@ -194,30 +196,68 @@ def build_user_object_with_passwords(extracted_user, hash_params):
 
 
 def invite_batch(user_objects, login_id, is_disabled):
-    # Create the user
-    try:
-        resp = descope_client.mgmt.user.invite_batch(
-            users=user_objects,
-            invite_url="https://localhost",
-            send_mail=False,
-            send_sms=False,
-        )
+    """
+    Invites a batch of users with retry logic for rate limiting.
+    
+    Args:
+    - user_objects: List of UserObj to create
+    - login_id: Login ID for the user
+    - is_disabled: Boolean indicating if user should be disabled
+    
+    Returns:
+    - Boolean indicating success/failure
+    """
+    max_retries = 5
+    retry_delay = 1  # Initial delay in seconds if Retry-After is not provided
 
-        # Update user status in Descope based on Firebase status
-        if is_disabled:
-            descope_client.mgmt.user.deactivate(login_id=login_id)
-            logging.info(f"User {login_id} deactivated in Descope.")
-        else:
-            descope_client.mgmt.user.activate(login_id=login_id)
-            logging.info(f"User {login_id} activated in Descope.")
+    for attempt in range(max_retries):
+        try:
+            # Create the user
+            resp = descope_client.mgmt.user.invite_batch(
+                users=user_objects,
+                invite_url="https://localhost",
+                send_mail=False,
+                send_sms=False,
+            )
 
-        return True
-    except AuthException as error:
-        logging.error(
-            f"Unable to create users with password. Error: {error.error_message}"
-        )
-        print(f"Unable to create users with password. Error: {error.error_message}")
-        return False
+            # Update user status in Descope based on Firebase status
+            if is_disabled:
+                descope_client.mgmt.user.deactivate(login_id=login_id)
+                logging.info(f"User {login_id} deactivated in Descope.")
+            else:
+                descope_client.mgmt.user.activate(login_id=login_id)
+                logging.info(f"User {login_id} activated in Descope.")
+
+            return True # Success, exit the loop and function
+
+        except RateLimitException as e:
+            print(f"WARNING: Rate limit hit for user {login_id}. Attempt {attempt + 1}/{max_retries}. Error: {e}")
+            if attempt == max_retries - 1:
+                print(f"ERROR: Max retries reached for user {login_id}. Skipping.")
+                return False # Max retries exceeded
+
+            try:
+                # Extract Retry-After header, default to exponential backoff
+                retry_after = int(e.rate_limit_parameters.get('Retry-After', retry_delay))
+                print(f"INFO: Waiting for {retry_after} seconds before retrying...")
+                time.sleep(retry_after)
+                # Optional: Increase default delay for next potential failure without Retry-After
+                retry_delay = min(retry_delay * 2, 60) # Double delay, cap at 60 seconds
+            except ValueError:
+                print(f"WARNING: Could not parse Retry-After value. Waiting for default {retry_delay} seconds.")
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 60)
+
+        except AuthException as error:
+            print(
+                f"ERROR: Unable to invite user {login_id}. Error: {error.error_message}"
+            )
+            logging.error(
+                f"Unable to create users with password. Error: {error.error_message}"
+            )
+            return False # Non-rate-limit error, fail immediately
+
+    return False # Should not be reached if logic is correct, but safety return
 
 
 def create_descope_user(user, hash_params):
