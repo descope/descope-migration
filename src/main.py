@@ -10,6 +10,7 @@ def main():
     passwords_file_path = ""
     from_json = False
     json_file_path = ""
+    just_in_time = False
 
     # General Tool Flags
     parser = argparse.ArgumentParser(
@@ -17,7 +18,7 @@ def main():
     )
     parser.add_argument(
         "provider",
-        choices=["firebase", "auth0", "cognito"],
+        choices=["firebase", "auth0", "cognito", "ping"],
         help="Specify the service to migrate from",
     )
     parser.add_argument("--dry-run", action="store_true", help="Enable dry run mode")
@@ -26,6 +27,11 @@ def main():
         "-v",
         action="store_true",
         help="Enable verbose printing for live runs and dry runs",
+    )
+    parser.add_argument(
+        "--just-in-time",
+        action="store_true",
+        help="Migrate only tenants, roles, and permissions (no users). For just-in-time migration.",
     )
 
     # Provider Specific Flags
@@ -52,6 +58,9 @@ def main():
     if args.verbose:
         verbose = True
 
+    if args.just_in_time:
+        just_in_time = True
+
     # Auth0 Flags
     if args.with_passwords:
         passwords_file_path = args.with_passwords[0]
@@ -76,6 +85,10 @@ def main():
         from cognito_migration import migrate_cognito
 
         migrate_cognito(dry_run, verbose)
+    elif provider == "ping":
+        from ping_migration import migrate_pingone
+
+        migrate_pingone(dry_run, verbose, just_in_time)
     else:
         print("Invalid service specified.")
 
