@@ -10,7 +10,6 @@ def main():
     passwords_file_path = ""
     from_json = False
     json_file_path = ""
-    just_in_time = False
 
     # General Tool Flags
     parser = argparse.ArgumentParser(
@@ -27,11 +26,6 @@ def main():
         "-v",
         action="store_true",
         help="Enable verbose printing for live runs and dry runs",
-    )
-    parser.add_argument(
-        "--just-in-time",
-        action="store_true",
-        help="Migrate only tenants, roles, and permissions (no users). For just-in-time migration.",
     )
 
     # Provider Specific Flags
@@ -57,9 +51,6 @@ def main():
 
     if args.verbose:
         verbose = True
-
-    if args.just_in_time:
-        just_in_time = True
 
     # Auth0 Flags
     if args.with_passwords:
@@ -88,7 +79,7 @@ def main():
     elif provider == "ping":
         from ping_migration import migrate_pingone
 
-        migrate_pingone(dry_run, verbose, just_in_time)
+        migrate_pingone(dry_run, verbose)
     else:
         print("Invalid service specified.")
 

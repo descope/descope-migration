@@ -29,7 +29,6 @@ PING_CLIENT_SECRET = os.getenv("PING_CLIENT_SECRET")
 PING_ENVIRONMENT_ID = os.getenv("PING_ENVIRONMENT_ID")
 PING_API_PATH = os.getenv("PING_API_PATH")
 
-# Placeholder for Descope client initialization
 descope_client = initialize_descope()
 
 
@@ -59,8 +58,6 @@ def get_pingone_access_token():
         token_data = response.json()
         _access_token = token_data.get("access_token")
         expires_in = token_data.get("expires_in", 3600)  # seconds
-        #print (_access_token)
-        #print(expires_in)
         _token_expiry = time.time() + expires_in - 60  # refresh 1 min before expiry
         return _access_token
     else:
@@ -76,7 +73,6 @@ def fetch_pingone_users():
         all_users.extend(fetch_pingone_environment_members(env["id"]))
 
     print(f"Total users fetched: {len(all_users)}")
-    #print(all_users[0])
     return all_users
 
 # --- Fetch Environments ( == Descope Tenants) from PingOne ---
@@ -87,27 +83,22 @@ def fetch_pingone_environments():
     envs_url = f"{PING_API_PATH}/environments"
     headers = {"Authorization": f"Bearer {get_pingone_access_token()}"}
     all_envs = []
-    limit = 100  # Number of users per page
-    offset = 0   # Starting offset
+    limit = 100  
+    offset = 0 
     
     while True:
         response = requests.get(envs_url, headers=headers, params={"limit": limit, "offset": offset})
         if response.status_code != 200:
-            #print(f"Failed to fetch groups with offset {offset}: {response.status_code} - {response.text}")
             break
             
         response_data = response.json()
-        #print(f"Response data: {response_data}")
         
         envs = response_data.get("_embedded", {}).get("environments", [])
         if not envs:
-            #print(f"No more groups found at offset {offset}")
             break
             
-        #print(f"Found {len(envs)} groups at offset {offset}")
         all_envs.extend(envs)
         
-        # If we got fewer users than the limit, we've reached the end
         if len(envs) < limit:
             break
             
@@ -117,8 +108,6 @@ def fetch_pingone_environments():
         if offset > 10000:  # Arbitrary limit
             break
 
-    #all_envs.remove(all_envs[1])
-    #print(f"Total environments fetched: {len(all_envs)}")
     return all_envs
 
 def fetch_pingone_builtin_roles():
@@ -132,27 +121,20 @@ def fetch_pingone_builtin_roles():
     offset = 0   # Starting offset
     
     while True:
-        #print(f"Fetching users with offset {offset}...")
         response = requests.get(roles_url, headers=headers, params={"limit": limit, "offset": offset})
         
         if response.status_code != 200:
-            #print(f"Failed to fetch users with offset {offset}: {response.status_code} - {response.text}")
             break
             
         response_data = response.json()
-        #print(f"Response data: {response_data}")
         
         roles = response_data.get("_embedded", {}).get("roles", [])
         if not roles:
-            #print(f"No more users found at offset {offset}")
             break
             
-       # print(f"Found {len(roles)} users at offset {offset}")
         all_roles.extend(roles)
         
-        # If we got fewer users than the limit, we've reached the end
         if len(roles) < limit:
-            #print(f"Received {len(roles)} users (less than limit {limit}), reached end of data")
             break
             
         offset += limit
@@ -163,7 +145,6 @@ def fetch_pingone_builtin_roles():
             break
     
     print(f"Total unique built-in roles fetched: {len(all_roles)}")
-   # print(all_roles[0])
     return all_roles
 
 def fetch_pingone_custom_roles(environment_id):
@@ -177,11 +158,9 @@ def fetch_pingone_custom_roles(environment_id):
     offset = 0   # Starting offset
     
     while True:
-        #print(f"Fetching users with offset {offset}...")
         response = requests.get(custom_roles_url, headers=headers, params={"limit": limit, "offset": offset})
         
         if response.status_code != 200:
-            #print(f"Failed to fetch users with offset {offset}: {response.status_code} - {response.text}")
             break
             
         response_data = response.json()
@@ -347,6 +326,7 @@ def fetch_pingone_role_name_by_role_id(role_id):
     #print(f"Total unique custom roles fetched: {len(all_roles)}")
    # print(all_roles[0])
     return role_info[0]
+
 
 ### End PingOne Actions
 
@@ -690,14 +670,12 @@ def process_users(all_users, dry_run, verbose):
         disabled_users_mismatch,
     )
 
-def process_pingone_environments(pingone_envs, dry_run, verbose, just_in_time=False):
+def process_pingone_environments(pingone_envs, dry_run, verbose):
     """
     Process the PingOne environments - creating tenants and associating users to tenants.
     Args:
     - pingone_envs (dict): Dictionary of environments fetched from PingOne
-    - dry_run (bool): Whether to perform a dry run
-    - verbose (bool): Whether to print verbose output
-    - just_in_time (bool): If True, skip user-to-tenant mapping
+    - ping_users (list): List of users fetched from PingOne API (no longer used for association)
     """
     successful_tenant_creation = 0
     tenant_exists_descope = 0
@@ -726,25 +704,22 @@ def process_pingone_environments(pingone_envs, dry_run, verbose, just_in_time=Fa
             else:
                 tenant_exists_descope += 1
             # Use fetch_pingone_environment_members to get users for this environment
-            if not just_in_time:
-                env_members = fetch_pingone_environment_members(environment["id"])
-                users_added = 0
-                for user in env_members:
-                    login_id = user.get("email") or user.get("username")
-                    success, error = add_descope_user_to_tenant(environment["id"], login_id)
-                    if success:
-                        users_added += 1
-                    else:
-                        failed_users_added_tenants.append(
-                            f"User {login_id} failed to be added to tenant {environment['name']} Reason: {error}"
-                        )
-                tenant_users.append(
-                    f"Associated {users_added} users with tenant: {environment['name']} "
-                )
-                if successful_tenant_creation % 10 == 0 and successful_tenant_creation > 0 and not verbose:
-                    print(f"Still working, migrated {successful_tenant_creation} environments.")
-            else:
-                tenant_users.append(f"(JIT) Skipped user-to-tenant mapping for tenant: {environment['name']}")
+            env_members = fetch_pingone_environment_members(environment["id"])
+            users_added = 0
+            for user in env_members:
+                login_id = user.get("email") or user.get("username")
+                success, error = add_descope_user_to_tenant(environment["id"], login_id)
+                if success:
+                    users_added += 1
+                else:
+                    failed_users_added_tenants.append(
+                        f"User {login_id} failed to be added to tenant {environment['name']} Reason: {error}"
+                    )
+            tenant_users.append(
+                f"Associated {users_added} users with tenant: {environment['name']} "
+            )
+            if successful_tenant_creation % 10 == 0 and successful_tenant_creation > 0 and not verbose:
+                print(f"Still working, migrated {successful_tenant_creation} environments.")
     return (
         successful_tenant_creation,
         tenant_exists_descope,
@@ -861,30 +836,37 @@ def process_roles(pingone_roles, pingone_environments, dry_run, verbose, ping_us
     )
 
 # --- Main Migration Function ---
-def migrate_pingone(dry_run, verbose, just_in_time=False):
+def migrate_pingone(dry_run, verbose):
     """
     Main function to orchestrate migration from PingOne to Descope.
-    If just_in_time is True, only migrate tenants, roles, and permissions (no users).
     """
     access_token = get_pingone_access_token()
     if not access_token:
         logging.error("Failed to obtain access token. Exiting.")
         return
 
-    if not just_in_time:
-        # 1. Fetch and create users
-        ping_users = fetch_pingone_users()
-        failed_users, successful_migrated_users, merged_users, disabled_users_mismatch = process_users(ping_users, dry_run, verbose)
-    else:
-        ping_users = None
-        failed_users = []
-        successful_migrated_users = 0
-        merged_users = []
-        disabled_users_mismatch = []
+   
 
+    url = f"{PING_API_PATH}/environments/{{envID}}/v2/Users/.search"
+
+    payload = "{\n    \"filter\": \"emails ew \\\"@example.com\\\"\",\n    \"count\": 10\n}"
+    headers = {
+    'Authorization': 'Bearer {{accessToken}}',
+    'Content-Type': 'application/json'
+    }
+
+    response = requests.request("POST", url, headers=headers, data = payload)
+
+    print(response.text.encode('utf8'))
+
+
+
+    # 1. Fetch and create users
+    ping_users = fetch_pingone_users()
+    failed_users, successful_migrated_users, merged_users, disabled_users_mismatch = process_users(ping_users, dry_run, verbose)
     # 2. Fetch and create environments (tenants) and associate users to tenants
     pingone_environments = fetch_pingone_environments()
-    successful_tenant_creation, tenant_exists_descope, failed_tenant_creation, failed_users_added_tenants, tenant_users = process_pingone_environments(pingone_environments, dry_run, verbose, just_in_time=just_in_time)
+    successful_tenant_creation, tenant_exists_descope, failed_tenant_creation, failed_users_added_tenants, tenant_users = process_pingone_environments(pingone_environments, dry_run, verbose)
     # 3. Fetch and create roles/permissions for all tenants, and assign roles to users
     pingone_roles = fetch_pingone_builtin_roles()
     for environment in pingone_environments:
@@ -894,25 +876,21 @@ def migrate_pingone(dry_run, verbose, just_in_time=False):
         
     if dry_run == False:
         print("=================== User Migration =============================")
-        if not just_in_time:
-            print(f"PingOne Users found via API {len(ping_users) if ping_users is not None else 0}")
-            print(f"Successfully migrated {successful_migrated_users} users")
-            print(f"Successfully merged {len(merged_users) if merged_users is not None else 0} users")
-            if verbose:
-                for merged_user in merged_users or []:
-                    print(f"Merged user: {merged_user}")
-            if len(disabled_users_mismatch) !=0:
-                print(f"Users migrated, but disabled due to one of the merged accounts being disabled {len(disabled_users_mismatch)}")
-                print(f"Users disabled due to one of the merged accounts being disabled {disabled_users_mismatch}")
-            if len(failed_users) !=0:
-                print(f"Failed to migrate {len(failed_users)}")
-                print(f"Users which failed to migrate:")
-                for failed_user in failed_users:
-                    print(failed_user)
-            print(f"Created users within Descope {successful_migrated_users - (len(merged_users) if merged_users is not None else 0)}")
-        else:
-            print("PingOne Users found via API 0")
-            print("Just-in-time migration: Skipped user migration.")
+        print(f"PingOne Users found via API {len(ping_users)}")
+        print(f"Successfully migrated {successful_migrated_users} users")
+        print(f"Successfully merged {len(merged_users)} users")
+        if verbose:
+            for merged_user in merged_users:
+                print(f"Merged user: {merged_user}")
+        if len(disabled_users_mismatch) !=0:
+            print(f"Users migrated, but disabled due to one of the merged accounts being disabled {len(disabled_users_mismatch)}")
+            print(f"Users disabled due to one of the merged accounts being disabled {disabled_users_mismatch}")
+        if len(failed_users) !=0:
+            print(f"Failed to migrate {len(failed_users)}")
+            print(f"Users which failed to migrate:")
+            for failed_user in failed_users:
+                print(failed_user)
+        print(f"Created users within Descope {successful_migrated_users - len(merged_users)}")
 
         print("=================== Role Migration =============================")
         print(f"PingOne Roles found via API {len(pingone_roles)}")
@@ -960,7 +938,6 @@ def migrate_pingone(dry_run, verbose, just_in_time=False):
             for failed_users_added_tenant in failed_users_added_tenants:
                 print(failed_users_added_tenant)
 
-##### DELETE THIS 
 if __name__ == "__main__":
     # Set your arguments here for testing
     migrate_pingone(
