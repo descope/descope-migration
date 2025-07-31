@@ -13,3 +13,4 @@ creds/*
 logs/*
 
 .env
+.DS_Store

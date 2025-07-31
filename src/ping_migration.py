@@ -36,6 +36,20 @@ descope_client = initialize_descope()
 
 # --- PingOne API Authentication ---
 def get_pingone_access_token():
+    """
+    Retrieve and manage access token for PingOne API authentication.
+    
+    This function implements token caching to avoid unnecessary API calls.
+    If a valid token exists, it returns the cached token. Otherwise, it
+    fetches a new token using client credentials flow.
+    
+    Returns:
+        str or None: The access token if successful, None if failed
+        
+    Global Variables:
+        _access_token (str): Cached access token
+        _token_expiry (float): Timestamp when token expires
+    """
     global _access_token, _token_expiry
 
     # If token is still valid, return it
@@ -66,6 +80,19 @@ def get_pingone_access_token():
 
 # --- Fetch All Users from your Organization from PingOne API ---
 def fetch_pingone_users():
+    """
+    Fetch all users from all PingOne environments.
+    
+    This function aggregates users from all environments by first fetching
+    all environments, then fetching users from each environment individually.
+    
+    Returns:
+        list: A list of all users across all environments
+        
+    Dependencies:
+        fetch_pingone_environments(): Gets all environments
+        fetch_pingone_environment_members(): Gets users for a specific environment
+    """
 
     all_envs = fetch_pingone_environments()
     all_users = []
@@ -79,6 +106,16 @@ def fetch_pingone_users():
 def fetch_pingone_environments():
     """
     Fetch and return all environments from PingOne.
+    
+    This function retrieves all environments from the PingOne API with pagination
+    support. It handles the API response structure and continues fetching until
+    all environments are retrieved.
+    
+    Returns:
+        list: A list of environment dictionaries containing environment details
+        
+    Environment Variables:
+        PING_API_PATH (str): Base URL for PingOne API
     """
     envs_url = f"{PING_API_PATH}/environments"
     headers = {"Authorization": f"Bearer {get_pingone_access_token()}"}
@@ -112,7 +149,16 @@ def fetch_pingone_environments():
 
 def fetch_pingone_builtin_roles():
     """
-    Fetch and return all built-in roles from PingOne (handle pagination).
+    Fetch and return all built-in roles from PingOne with pagination support.
+    
+    This function retrieves all built-in roles from the PingOne API. Built-in
+    roles are system-defined roles that are available across all environments.
+    
+    Returns:
+        list: A list of built-in role dictionaries containing role details
+        
+    Environment Variables:
+        PING_API_PATH (str): Base URL for PingOne API
     """
     roles_url = f"{PING_API_PATH}/roles"
     headers = {"Authorization": f"Bearer {get_pingone_access_token()}"}
@@ -141,7 +187,6 @@ def fetch_pingone_builtin_roles():
         
         # Safety check to prevent infinite loops
         if offset > 10000:  # Arbitrary limit
-            print("Reached maximum offset limit (10000), stopping pagination")
             break
     
     print(f"Total unique built-in roles fetched: {len(all_roles)}")
@@ -149,7 +194,19 @@ def fetch_pingone_builtin_roles():
 
 def fetch_pingone_custom_roles(environment_id):
     """
-    Fetch and return all custom roles from PingOne (handle pagination).
+    Fetch and return all custom roles from a specific PingOne environment.
+    
+    This function retrieves all custom roles for a given environment with pagination
+    support. Custom roles are environment-specific roles created by administrators.
+    
+    Args:
+        environment_id (str): The ID of the environment to fetch custom roles from
+        
+    Returns:
+        list: A list of custom role dictionaries containing role details
+        
+    Environment Variables:
+        PING_API_PATH (str): Base URL for PingOne API
     """
     custom_roles_url = f"{PING_API_PATH}/environments/{environment_id}/roles?filter=%28type+eq+%22CUSTOM%22%29"
     headers = {"Authorization": f"Bearer {get_pingone_access_token()}"}
@@ -164,37 +221,41 @@ def fetch_pingone_custom_roles(environment_id):
             break
             
         response_data = response.json()
-        #print(f"Response data: {response_data}")
         
         roles = response_data.get("_embedded", {}).get("roles", [])
         if not roles:
-            #print(f"No more users found at offset {offset}")
             break
             
-       # print(f"Found {len(roles)} users at offset {offset}")
         all_roles.extend(roles)
         
-        # If we got fewer users than the limit, we've reached the end
         if len(roles) < limit:
-            #print(f"Received {len(roles)} users (less than limit {limit}), reached end of data")
             break
             
         offset += limit
         
         # Safety check to prevent infinite loops
         if offset > 10000:  # Arbitrary limit
-            #print("Reached maximum offset limit (10000), stopping pagination")
             break
     
-    print(f"Total unique custom roles fetched: {len(all_roles)}")
-   # print(all_roles[0])
     return all_roles
 
 def fetch_pingone_environment_members(environment_id):
     """
-    Fetch and return all users from PingOne (handle pagination).
+    Fetch and return all users from a specific PingOne environment.
+    
+    This function retrieves all users for a given environment with pagination
+    support. It handles the API response structure and continues fetching until
+    all users in the environment are retrieved.
+    
+    Args:
+        environment_id (str): The ID of the environment to fetch users from
+        
+    Returns:
+        list: A list of user dictionaries containing user details
+        
+    Environment Variables:
+        PING_API_PATH (str): Base URL for PingOne API
     """
-    #environment_id = environment["id"]
     envs_url = f"{PING_API_PATH}/environments/{environment_id}/users"
     headers = {"Authorization": f"Bearer {get_pingone_access_token()}"}
     all_users = []
@@ -202,48 +263,47 @@ def fetch_pingone_environment_members(environment_id):
     offset = 0   # Starting offset
 
     while True:
-        #print(f"Fetching users with offset {offset}...")
         response = requests.get(envs_url, headers=headers, params={"limit": limit, "offset": offset})
         
         if response.status_code != 200:
-            #print(f"Failed to fetch users with offset {offset}: {response.status_code} - {response.text}")
             break
             
         response_data = response.json()
-        #print(f"Response data: {response_data}")
         
         users = response_data.get("_embedded", {}).get("users", [])
         if not users:
-            #print(f"No more users found at offset {offset}")
             break
             
-        #print(f"Found {len(users)} users at offset {offset}")
         all_users.extend(users)
         
-        # If we got fewer users than the limit, we've reached the end
         if len(users) < limit:
-            #print(f"Received {len(users)} users (less than limit {limit}), reached end of data")
             break
             
         offset += limit
         
         # Safety check to prevent infinite loops
         if offset > 10000:  # Arbitrary limit
-            #print("Reached maximum offset limit (10000), stopping pagination")
             break
     
-    #print(f"Total users fetched in environment {environment_id}: {len(all_users)}")
-   # print(all_users[0])
     return all_users
 
 def fetch_pingone_user_roles(user_id, environment_id):
     """
-    Fetch and return all roles assigned to a specific user from PingOne, filtered so only roles whose assignment's scope.id matches the user's environment_id are returned.
+    Fetch and return all roles assigned to a specific user from PingOne.
+    
+    This function retrieves all role assignments for a user and filters them based
+    on scope. Only roles whose assignment scope matches the user's environment
+    or is organization-wide are returned.
+    
     Args:
-    - user_id (str): The ID of the user to get roles for
-    - environment_id (str): The environment ID where the user exists
+        user_id (str): The ID of the user to get roles for
+        environment_id (str): The environment ID where the user exists
+        
     Returns:
-    - all_roles (list): A list of roles assigned to the user in the given environment
+        list: A list of roles assigned to the user in the given environment
+        
+    Environment Variables:
+        PING_API_PATH (str): Base URL for PingOne API
     """
     roles_url = f"{PING_API_PATH}/environments/{environment_id}/users/{user_id}/roleAssignments"
     headers = {"Authorization": f"Bearer {get_pingone_access_token()}"}
@@ -274,7 +334,7 @@ def fetch_pingone_user_roles(user_id, environment_id):
                 all_roles.append(role)
             elif scope_type == "ENVIRONMENT" and scope_id == environment_id:
                 all_roles.append(role)
-            # else: skip
+           
         if len(role_assignments) < limit:
             break
         offset += limit
@@ -284,7 +344,20 @@ def fetch_pingone_user_roles(user_id, environment_id):
 
 def fetch_pingone_role_name_by_role_id(role_id):
     """
-    Fetch and return all custom roles from PingOne (handle pagination).
+    Fetch and return the name of a role by its ID from PingOne.
+    
+    This function retrieves the role details for a specific role ID and
+    returns the role name. It's used to resolve role names from role IDs
+    when processing user role assignments.
+    
+    Args:
+        role_id (str): The ID of the role to fetch the name for
+        
+    Returns:
+        str: The name of the role, or None if not found
+        
+    Environment Variables:
+        PING_API_PATH (str): Base URL for PingOne API
     """
     roles_url = f"{PING_API_PATH}/roles/{role_id}"
     headers = {"Authorization": f"Bearer {get_pingone_access_token()}"}
@@ -293,38 +366,28 @@ def fetch_pingone_role_name_by_role_id(role_id):
     offset = 0   # Starting offset
     
     while True:
-        #print(f"Fetching users with offset {offset}...")
         response = requests.get(roles_url, headers=headers, params={"limit": limit, "offset": offset})
         
         if response.status_code != 200:
-            #print(f"Failed to fetch users with offset {offset}: {response.status_code} - {response.text}")
             break
             
         response_data = response.json()
-        #print(f"Response data: {response_data}")
         
         role = response_data.get("name")
         if not role:
-            #print(f"No more users found at offset {offset}")
             break
             
-       # print(f"Found {len(roles)} users at offset {offset}")
         role_info.append(role)
         
-        # If we got fewer users than the limit, we've reached the end
         if len(role) < limit:
-            #print(f"Received {len(roles)} users (less than limit {limit}), reached end of data")
             break
             
         offset += limit
         
         # Safety check to prevent infinite loops
         if offset > 10000:  # Arbitrary limit
-            #print("Reached maximum offset limit (10000), stopping pagination")
             break
-    
-    #print(f"Total unique custom roles fetched: {len(all_roles)}")
-   # print(all_roles[0])
+ 
     return role_info[0]
 
 
@@ -334,9 +397,24 @@ def fetch_pingone_role_name_by_role_id(role_id):
 
 def create_descope_user(user):
     """
-    Create a Descope user based on matched PingOne user data using Descope Python SDK.
+    Create a Descope user based on PingOne user data using Descope Python SDK.
+    
+    This function creates or updates a user in Descope based on PingOne user data.
+    It handles both new user creation and existing user updates. The function
+    also manages user status (enabled/disabled) and custom attributes.
+    
     Args:
-    - user (dict): A dictionary containing user details fetched from PingOne API.
+        user (dict): A dictionary containing user details fetched from PingOne API
+        
+    Returns:
+        tuple: (success (bool), merged_user_name (str), disabled_mismatch (bool), error_message (str))
+            - success: Whether the operation was successful
+            - merged_user_name: Name of user if merged, empty string otherwise
+            - disabled_mismatch: Whether there was a disabled status mismatch
+            - error_message: Error message if operation failed
+            
+    Dependencies:
+        descope_client: Initialized Descope client
     """
     try:
         login_ids = []
@@ -477,10 +555,22 @@ def create_descope_user(user):
 
 def create_descope_tenant(organization):
     """
-    Create a Descope tenant based on matched PingOne environment data.
-
+    Create a Descope tenant based on PingOne environment data.
+    
+    This function creates a new tenant in Descope using the environment
+    information from PingOne. The tenant ID and name are derived from
+    the PingOne environment data.
+    
     Args:
-    - environment (dict): A dictionary containing environment details fetched from PingOne API.
+        organization (dict): A dictionary containing environment details fetched from PingOne API
+        
+    Returns:
+        tuple: (success (bool), error_message (str))
+            - success: Whether the tenant creation was successful
+            - error_message: Error message if creation failed
+            
+    Dependencies:
+        descope_client: Initialized Descope client
     """
     name = organization["name"]
     tenant_id = organization["id"]
@@ -495,11 +585,23 @@ def create_descope_tenant(organization):
 
 def add_descope_user_to_tenant(tenantId, loginId):
     """
-    Map a descope user to a tenant based on PingOne data using Descope SDK.
-
+    Map a Descope user to a tenant based on PingOne data using Descope SDK.
+    
+    This function associates a user with a tenant in Descope. It first checks
+    if the user is already associated with the tenant to avoid duplicates.
+    
     Args:
-    - tenant (string): The tenant ID of the tenant to associate the user.
-    - loginId (string): the loginId of the user to associate to the tenant.
+        tenantId (str): The tenant ID of the tenant to associate the user with
+        loginId (str): The login ID of the user to associate with the tenant
+        
+    Returns:
+        tuple: (success (bool), error_message (str))
+            - success: Whether the association was successful
+            - error_message: Error message if association failed
+            
+    Dependencies:
+        descope_client: Initialized Descope client
+        check_user_in_tenant_descope(): Checks if user is already in tenant
     """
     if not check_user_in_tenant_descope(loginId, tenantId):
         try:
@@ -513,6 +615,21 @@ def add_descope_user_to_tenant(tenantId, loginId):
     return False, "User already exists in tenant"
 
 def check_tenant_exists_descope(tenant_id):
+    """
+    Check if a tenant exists in Descope.
+    
+    This function attempts to load a tenant by ID to determine if it
+    already exists in the Descope system.
+    
+    Args:
+        tenant_id (str): The ID of the tenant to check
+        
+    Returns:
+        bool: True if tenant exists, False otherwise
+        
+    Dependencies:
+        descope_client: Initialized Descope client
+    """
 
     try:
         tenant_resp = descope_client.mgmt.tenant.load(tenant_id)
@@ -523,10 +640,19 @@ def check_tenant_exists_descope(tenant_id):
 def check_user_in_tenant_descope(user_login_id, tenant_id):
     """
     Check if a user is already in a tenant in Descope.
-
+    
+    This function loads a user and checks if they are already associated
+    with the specified tenant by examining their tenant associations.
+    
     Args:
-    - user_login_id (string): The login ID of the user to check.
-    - tenant_id (string): The tenant ID to check for the user.
+        user_login_id (str): The login ID of the user to check
+        tenant_id (str): The tenant ID to check for the user
+        
+    Returns:
+        bool: True if user is in the tenant, False otherwise
+        
+    Dependencies:
+        descope_client: Initialized Descope client
     """
 
     try:
@@ -541,6 +667,22 @@ def check_user_in_tenant_descope(user_login_id, tenant_id):
         return False
 
 def check_role_exists_descope(role_name,tenant_id):
+    """
+    Check if a role exists in Descope.
+    
+    This function searches for a role by name, optionally scoped to a specific
+    tenant. It handles both global roles (tenant_id=None) and tenant-scoped roles.
+    
+    Args:
+        role_name (str): The name of the role to check
+        tenant_id (str or None): The tenant ID to scope the search to, or None for global roles
+        
+    Returns:
+        bool: True if role exists, False otherwise
+        
+    Dependencies:
+        descope_client: Initialized Descope client
+    """
     try:
         if tenant_id is not None:
             roles_resp = descope_client.mgmt.role.search(role_names=[role_name],tenant_ids=[tenant_id])
@@ -557,11 +699,28 @@ def check_role_exists_descope(role_name,tenant_id):
 def create_descope_role_and_permissions(role, permissions, tenant_id):
     """
     Create a Descope role and its associated permissions using the Descope Python SDK.
-
+    
+    This function creates permissions first, then creates a role with those permissions.
+    It handles both new permission creation and existing permission updates. The role
+    can be scoped to a specific tenant or be global.
+    
     Args:
-    - role (dict): A dictionary containing role details from PingOne.
-    - permissions (dict): A dictionary containing permissions details from PingOne.
-    - tenant_id (str or None): The tenant ID to scope the role to, or None for global.
+        role (dict): A dictionary containing role details from PingOne
+        permissions (list): A list of permission dictionaries from PingOne
+        tenant_id (str or None): The tenant ID to scope the role to, or None for global
+        
+    Returns:
+        tuple: (success (bool), role_exists (bool), success_permissions (int), 
+                existing_permissions_descope (list), failed_permissions (list), error_message (str))
+            - success: Whether the role creation was successful
+            - role_exists: Whether the role already existed (always False in current implementation)
+            - success_permissions: Number of permissions successfully created/updated
+            - existing_permissions_descope: List of permissions that already existed
+            - failed_permissions: List of permissions that failed to create
+            - error_message: Error message if role creation failed
+            
+    Dependencies:
+        descope_client: Initialized Descope client
     """
     permissionNames = []
     success_permissions = 0
@@ -632,8 +791,26 @@ def create_descope_role_and_permissions(role, permissions, tenant_id):
 def process_users(all_users, dry_run, verbose):
     """
     Process the list of users from PingOne by mapping and creating them in Descope.
+    
+    This function iterates through all users from PingOne and creates or updates
+    them in Descope. It handles both dry run mode (for testing) and verbose
+    output for detailed logging.
+    
     Args:
-    - all_users (list): A list of users fetched from PingOne API.
+        all_users (list): A list of users fetched from PingOne API
+        dry_run (bool): If True, only simulate the migration without making changes
+        verbose (bool): If True, print detailed information about each user
+        
+    Returns:
+        tuple: (failed_users (list), successful_migrated_users (int), 
+                merged_users (list), disabled_users_mismatch (list))
+            - failed_users: List of user IDs that failed to migrate
+            - successful_migrated_users: Number of users successfully migrated
+            - merged_users: List of users that were merged with existing users
+            - disabled_users_mismatch: List of users with disabled status mismatches
+            
+    Dependencies:
+        create_descope_user(): Creates or updates individual users
     """
     failed_users = []
     successful_migrated_users = 0
@@ -673,9 +850,30 @@ def process_users(all_users, dry_run, verbose):
 def process_pingone_environments(pingone_envs, dry_run, verbose):
     """
     Process the PingOne environments - creating tenants and associating users to tenants.
+    
+    This function creates tenants in Descope based on PingOne environments and
+    associates users with those tenants. It handles both dry run mode and
+    verbose output for detailed logging.
+    
     Args:
-    - pingone_envs (dict): Dictionary of environments fetched from PingOne
-    - ping_users (list): List of users fetched from PingOne API (no longer used for association)
+        pingone_envs (list): List of environments fetched from PingOne
+        dry_run (bool): If True, only simulate the migration without making changes
+        verbose (bool): If True, print detailed information about each environment
+        
+    Returns:
+        tuple: (successful_tenant_creation (int), tenant_exists_descope (int), 
+                failed_tenant_creation (list), failed_users_added_tenants (list), 
+                tenant_users (list))
+            - successful_tenant_creation: Number of tenants successfully created
+            - tenant_exists_descope: Number of tenants that already existed
+            - failed_tenant_creation: List of tenant creation errors
+            - failed_users_added_tenants: List of user-tenant association errors
+            - tenant_users: List of successful user-tenant associations
+            
+    Dependencies:
+        create_descope_tenant(): Creates individual tenants
+        add_descope_user_to_tenant(): Associates users with tenants
+        fetch_pingone_environment_members(): Gets users for a specific environment
     """
     successful_tenant_creation = 0
     tenant_exists_descope = 0
@@ -731,12 +929,38 @@ def process_pingone_environments(pingone_envs, dry_run, verbose):
 def process_roles(pingone_roles, pingone_environments, dry_run, verbose, ping_users=None):
     """
     Process creating roles, permissions, and associating users in Descope.
+    
+    This function creates roles and permissions in Descope based on PingOne data,
+    then assigns roles to users. It handles both global roles and tenant-scoped
+    roles, and manages role assignments to users.
+    
     Args:
-    - pingone_roles (list): List of roles fetched from PingOne
-    - pingone_environments (list): List of environments (tenants) fetched from PingOne
-    - dry_run (bool): Whether to perform a dry run
-    - verbose (bool): Whether to print verbose output
-    - ping_users (list): List of users fetched from PingOne API (for role assignment)
+        pingone_roles (list): List of roles fetched from PingOne
+        pingone_environments (list): List of environments (tenants) fetched from PingOne
+        dry_run (bool): If True, only simulate the migration without making changes
+        verbose (bool): If True, print detailed information about each role
+        ping_users (list, optional): List of users fetched from PingOne API for role assignment
+        
+    Returns:
+        tuple: (failed_roles (list), successful_migrated_roles (int), roles_exist_descope (int),
+                total_failed_permissions (list), successful_migrated_permissions (int),
+                total_existing_permissions_descope (list), roles_and_users (list),
+                failed_roles_and_users (list), total_roles_assigned (int), failed_role_assignments (list))
+            - failed_roles: List of roles that failed to migrate
+            - successful_migrated_roles: Number of roles successfully migrated
+            - roles_exist_descope: Number of roles that already existed (always 0 in current implementation)
+            - total_failed_permissions: List of permissions that failed to create
+            - successful_migrated_permissions: Number of permissions successfully migrated
+            - total_existing_permissions_descope: List of permissions that already existed
+            - roles_and_users: List of successful role-user associations
+            - failed_roles_and_users: List of failed role-user associations
+            - total_roles_assigned: Number of roles successfully assigned to users
+            - failed_role_assignments: List of failed role assignments
+            
+    Dependencies:
+        create_descope_role_and_permissions(): Creates roles and permissions
+        fetch_pingone_user_roles(): Gets roles for a specific user
+        fetch_pingone_role_name_by_role_id(): Gets role name by role ID
     """
     descope_roles_to_create = []
     for role in pingone_roles:
@@ -768,7 +992,6 @@ def process_roles(pingone_roles, pingone_environments, dry_run, verbose, ping_us
                 permissions = role["permissions"]
                 print(f"\tRole: {role['name']} (tenant_id={tenant_id}) with {len(permissions)} associated permissions")
     else:
-        #print(f"Starting migration of {len(descope_roles_to_create)} roles found via PingOne API")
         for role, tenant_id in descope_roles_to_create:
             permissions = role["permissions"]
             (
@@ -839,6 +1062,33 @@ def process_roles(pingone_roles, pingone_environments, dry_run, verbose, ping_us
 def migrate_pingone(dry_run, verbose):
     """
     Main function to orchestrate migration from PingOne to Descope.
+    
+    This function coordinates the entire migration process from PingOne to Descope.
+    It performs the following steps in order:
+    1. Authenticates with PingOne API
+    2. Fetches and creates users in Descope
+    3. Fetches and creates environments as tenants in Descope
+    4. Associates users with their respective tenants
+    5. Fetches and creates roles and permissions in Descope
+    6. Assigns roles to users based on their PingOne assignments
+    7. Prints comprehensive migration statistics
+    
+    Args:
+        dry_run (bool): If True, only simulate the migration without making changes
+        verbose (bool): If True, print detailed information during migration
+        
+    Returns:
+        None: This function prints results to console and doesn't return values
+        
+    Dependencies:
+        get_pingone_access_token(): Authenticates with PingOne
+        fetch_pingone_users(): Gets all users from PingOne
+        fetch_pingone_environments(): Gets all environments from PingOne
+        fetch_pingone_builtin_roles(): Gets built-in roles from PingOne
+        fetch_pingone_custom_roles(): Gets custom roles from PingOne
+        process_users(): Processes user migration
+        process_pingone_environments(): Processes environment/tenant migration
+        process_roles(): Processes role and permission migration
     """
     access_token = get_pingone_access_token()
     if not access_token:
@@ -858,7 +1108,6 @@ def migrate_pingone(dry_run, verbose):
     response = requests.request("POST", url, headers=headers, data = payload)
 
     print(response.text.encode('utf8'))
-
 
 
     # 1. Fetch and create users
@@ -938,10 +1187,3 @@ def migrate_pingone(dry_run, verbose):
             for failed_users_added_tenant in failed_users_added_tenants:
                 print(failed_users_added_tenant)
 
-if __name__ == "__main__":
-    # Set your arguments here for testing
-    migrate_pingone(
-        dry_run=False,           # or False
-        verbose=True,           # or False
-    )
-        
