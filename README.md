@@ -5,6 +5,7 @@ This currently tool supports the following third-party services:
 - Auth0
 - AWS Cognito
 - Firebase
+- Ping
   
 
 >Migrations can differ wildly depending on the specific identity implementation and provider. However, this tool serves as a template that you can edit if it doesn't fully meet your needs.
@@ -30,10 +31,11 @@ source venv/bin/activate
 pip3 install -r requirements.txt
 ```
 
-4. Follow the guide for your specfic third-party 
+4. Follow the guide for your specific third-party 
     - [Auth0](https://docs.descope.com/migrate/auth0)
     - [AWS Cognito](https://docs.descope.com/migrate/cognito)
     - [Firebase](https://docs.descope.com/migrate/firebase)
+    - [Ping](https://docs.descope.com/migrate/ping)
     - If you're using a Custom data store please follow this guide instead [Custom Data Store](https://docs.descope.com/migrate/custom)
 
 ## Running the Migration Script 🚀
@@ -48,6 +50,7 @@ The following are supported:
 - `auth0` for Auth0 by Okta
 - `cognito` for AWS Cognito
 - `firebase` for Firebase
+- `ping` for Ping
 
 Use:
 ```
@@ -60,6 +63,7 @@ Pick the third-party you are migrating from and follow the corrosponding guide
 - [Auth0](https://docs.descope.com/migrate/auth0)
 - [AWS Cognito](https://docs.descope.com/migrate/cognito)
 - [Firebase](https://docs.descope.com/migrate/firebase)
+- [Ping](https://docs.descope.com/migrate/ping)
 
 ### Dry Run vs Live Run
 
