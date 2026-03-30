@@ -7,7 +7,7 @@
 **Plans:** 1 plan
 
 Plans:
-- [ ] 01-01-PLAN.md -- Full Frontegg migration module + CLI integration
+- [x] 01-01-PLAN.md -- Full Frontegg migration module + CLI integration (Tasks 1-2 complete; Task 3 awaiting human dry-run verification)
 
 **Deliverables:**
 - `src/frontegg_migration.py` -- full migration pipeline for Frontegg users, roles, tenants, and permissions
