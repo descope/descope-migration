@@ -17,7 +17,7 @@ def main():
     )
     parser.add_argument(
         "provider",
-        choices=["firebase", "auth0", "cognito", "ping"],
+        choices=["firebase", "auth0", "cognito", "ping", "frontegg"],
         help="Specify the service to migrate from",
     )
     parser.add_argument("--dry-run", action="store_true", help="Enable dry run mode")
@@ -80,6 +80,10 @@ def main():
         from ping_migration import migrate_pingone
 
         migrate_pingone(dry_run, verbose)
+    elif provider == "frontegg":
+        from frontegg_migration import migrate_frontegg
+
+        migrate_frontegg(dry_run, verbose)
     else:
         print("Invalid service specified.")
 

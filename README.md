@@ -6,6 +6,7 @@ This currently tool supports the following third-party services:
 - AWS Cognito
 - Firebase
 - Ping
+- Frontegg
   
 
 >Migrations can differ wildly depending on the specific identity implementation and provider. However, this tool serves as a template that you can edit if it doesn't fully meet your needs.
@@ -46,11 +47,12 @@ The tool will handle migrations differently for each third-party service. Howeve
 
 To pick the the Third-Party service to migrate from you must pass the `provider` flag
 
-The following are supported: 
+The following are supported:
 - `auth0` for Auth0 by Okta
 - `cognito` for AWS Cognito
 - `firebase` for Firebase
 - `ping` for Ping
+- `frontegg` for Frontegg
 
 Use:
 ```
@@ -64,6 +66,7 @@ Pick the third-party you are migrating from and follow the corrosponding guide
 - [AWS Cognito](https://docs.descope.com/migrate/cognito)
 - [Firebase](https://docs.descope.com/migrate/firebase)
 - [Ping](https://docs.descope.com/migrate/ping)
+- Frontegg (see .env.example for required credentials)
 
 ### Dry Run vs Live Run
 
