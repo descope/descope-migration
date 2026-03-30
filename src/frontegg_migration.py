@@ -1,0 +1,657 @@
+import os
+import logging
+import requests
+import json
+import re
+import time
+from dotenv import load_dotenv
+from setup import initialize_descope
+from utils import api_request_with_retry, create_custom_attributes_in_descope
+
+"""
+Load and read environment variables from .env file
+"""
+load_dotenv()
+FRONTEGG_CLIENT_ID = os.getenv("FRONTEGG_CLIENT_ID")
+FRONTEGG_SECRET_KEY = os.getenv("FRONTEGG_SECRET_KEY")
+
+descope_client = initialize_descope()
+
+# Token caching globals
+_access_token = None
+_token_expiry = 0
+
+# Module-level ID-to-name maps for resolving permissions and roles
+_permission_id_to_name = {}
+_role_id_to_name = {}
+
+
+### Begin Frontegg Actions
+
+# --- Frontegg API Authentication ---
+def get_frontegg_access_token():
+    """
+    Retrieve and manage access token for Frontegg API authentication.
+
+    This function implements token caching to avoid unnecessary API calls.
+    If a valid token exists, it returns the cached token. Otherwise, it
+    fetches a new token using the vendor credentials flow.
+
+    Returns:
+        str or None: The access token if successful, None if failed
+
+    Global Variables:
+        _access_token (str): Cached access token
+        _token_expiry (float): Timestamp when token expires
+    """
+    global _access_token, _token_expiry
+
+    # If token is still valid, return it
+    if _access_token and time.time() < _token_expiry:
+        return _access_token
+
+    # Fetch a new token using vendor credentials
+    token_url = "https://api.frontegg.com/auth/vendor"
+    payload = {
+        "clientId": FRONTEGG_CLIENT_ID,
+        "secret": FRONTEGG_SECRET_KEY,
+    }
+    headers = {
+        "Content-Type": "application/json",
+    }
+    response = requests.post(token_url, json=payload, headers=headers)
+    if response.status_code == 200:
+        data = response.json()
+        _access_token = data.get("token") or data.get("accessToken")
+        expires_in = data.get("expiresIn", 3600)
+        _token_expiry = time.time() + expires_in - 60  # Refresh 1 min before expiry
+        return _access_token
+    else:
+        logging.error(f"Failed to get Frontegg access token: {response.text}")
+        return None
+
+
+def _get_auth_headers():
+    """
+    Build authorization headers using the current access token.
+
+    Returns:
+        dict or None: Headers dict if token available, None otherwise
+    """
+    token = get_frontegg_access_token()
+    if not token:
+        return None
+    return {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+
+# --- Fetch Functions ---
+
+def fetch_frontegg_tenants():
+    """
+    Fetch all tenants from Frontegg using record-count offset pagination.
+
+    Returns:
+        list: All tenants fetched from Frontegg
+    """
+    base_url = "https://api.frontegg.com/tenants/resources/tenants/v2"
+    all_tenants = []
+    limit = 50
+    offset = 0
+
+    while offset <= 10000:
+        headers = _get_auth_headers()
+        if not headers:
+            logging.error("Cannot fetch tenants: no valid access token")
+            break
+
+        url = f"{base_url}?_offset={offset}&_limit={limit}"
+        response = api_request_with_retry("get", url, headers)
+        if not response:
+            logging.error(f"Failed to fetch tenants at offset {offset}")
+            break
+
+        data = response.json()
+        if isinstance(data, dict):
+            items = data.get("items", data) if "items" in data else list(data.values()) if data else []
+            # Prefer items key; if not present treat entire dict as single item is wrong,
+            # handle gracefully
+            items = data.get("items", [])
+            if not items and isinstance(data, dict):
+                # Might be a bare list wrapped in dict without "items"
+                items = data.get("data", [])
+        else:
+            items = data if isinstance(data, list) else []
+
+        all_tenants.extend(items)
+
+        if len(items) < limit:
+            break
+
+        offset += limit
+
+    logging.info(f"Fetched {len(all_tenants)} tenants from Frontegg")
+    return all_tenants
+
+
+def fetch_frontegg_permissions():
+    """
+    Fetch all permissions from Frontegg using record-count offset pagination.
+
+    Returns:
+        list: All permissions fetched from Frontegg
+    """
+    base_url = "https://api.frontegg.com/identity/resources/permissions/v1"
+    all_permissions = []
+    limit = 50
+    offset = 0
+
+    while offset <= 10000:
+        headers = _get_auth_headers()
+        if not headers:
+            logging.error("Cannot fetch permissions: no valid access token")
+            break
+
+        url = f"{base_url}?_offset={offset}&_limit={limit}"
+        response = api_request_with_retry("get", url, headers)
+        if not response:
+            logging.error(f"Failed to fetch permissions at offset {offset}")
+            break
+
+        data = response.json()
+        if isinstance(data, dict):
+            items = data.get("items", [])
+            if not items:
+                items = data.get("data", [])
+        else:
+            items = data if isinstance(data, list) else []
+
+        all_permissions.extend(items)
+
+        if len(items) < limit:
+            break
+
+        offset += limit
+
+    logging.info(f"Fetched {len(all_permissions)} permissions from Frontegg")
+    return all_permissions
+
+
+def fetch_frontegg_roles():
+    """
+    Fetch all roles from Frontegg using record-count offset pagination.
+
+    Returns:
+        list: All roles fetched from Frontegg
+    """
+    base_url = "https://api.frontegg.com/identity/resources/roles/v1"
+    all_roles = []
+    limit = 50
+    offset = 0
+
+    while offset <= 10000:
+        headers = _get_auth_headers()
+        if not headers:
+            logging.error("Cannot fetch roles: no valid access token")
+            break
+
+        url = f"{base_url}?_offset={offset}&_limit={limit}"
+        response = api_request_with_retry("get", url, headers)
+        if not response:
+            logging.error(f"Failed to fetch roles at offset {offset}")
+            break
+
+        data = response.json()
+        if isinstance(data, dict):
+            items = data.get("items", [])
+            if not items:
+                items = data.get("data", [])
+        else:
+            items = data if isinstance(data, list) else []
+
+        all_roles.extend(items)
+
+        if len(items) < limit:
+            break
+
+        offset += limit
+
+    logging.info(f"Fetched {len(all_roles)} roles from Frontegg")
+    return all_roles
+
+
+def fetch_frontegg_users():
+    """
+    Fetch all users from Frontegg using page-number offset pagination.
+
+    Note: _offset is a PAGE NUMBER (0-indexed), not a record count.
+    _limit is the number of users per page (max 200).
+
+    Returns:
+        list: All users fetched from Frontegg
+    """
+    base_url = "https://api.frontegg.com/identity/resources/users/v1"
+    all_users = []
+    limit = 200
+    page = 0
+    total_pages = 1
+
+    while page < total_pages:
+        headers = _get_auth_headers()
+        if not headers:
+            logging.error("Cannot fetch users: no valid access token")
+            break
+
+        url = f"{base_url}?_limit={limit}&_offset={page}&_includeSubTenants=true"
+        response = api_request_with_retry("get", url, headers)
+        if not response:
+            logging.error(f"Failed to fetch users at page {page}")
+            break
+
+        data = response.json()
+        items = data.get("items", [])
+        metadata = data.get("_metadata", {})
+        total_pages = metadata.get("totalPages", 1)
+
+        if len(items) == 0:
+            break
+
+        all_users.extend(items)
+
+        if page >= total_pages - 1:
+            break
+
+        page += 1
+
+    logging.info(f"Fetched {len(all_users)} users from Frontegg")
+    return all_users
+
+
+# --- Write Functions ---
+
+def write_tenants(tenants, dry_run, verbose):
+    """
+    Write tenants to Descope.
+
+    Args:
+        tenants (list): List of tenant dicts from Frontegg
+        dry_run (bool): If True, only print what would be done without making API calls
+        verbose (bool): If True, print detailed information about each tenant
+    """
+    created_count = 0
+    failed_count = 0
+
+    for tenant in tenants:
+        tenant_id = tenant.get("tenantId") or tenant.get("id")
+        name = tenant.get("name", "")
+        domain = tenant.get("domain")
+
+        if dry_run:
+            print(f"[DRY RUN] Would create tenant: {name} (id: {tenant_id})")
+            if verbose and domain:
+                print(f"  Domain: {domain}")
+            continue
+
+        try:
+            descope_client.mgmt.tenant.create(name=name, id=tenant_id)
+            created_count += 1
+            if verbose:
+                logging.info(f"Created tenant: {name} (id: {tenant_id})")
+        except Exception as e:
+            logging.error(f"Failed to create tenant {name}: {e}")
+            failed_count += 1
+            continue
+
+        if domain:
+            try:
+                descope_client.mgmt.tenant.update(
+                    id=tenant_id,
+                    name=name,
+                    self_provisioning_domains=[domain],
+                )
+            except Exception as e:
+                logging.warning(f"Failed to set domain {domain} for tenant {tenant_id}: {e}")
+
+    if not dry_run:
+        print(f"Tenants: {created_count} created, {failed_count} failed")
+
+
+def write_permissions(permissions, dry_run, verbose):
+    """
+    Write permissions to Descope and populate the _permission_id_to_name map.
+
+    Note: The map is always populated even in dry_run mode so that
+    write_roles() can resolve permission IDs to names.
+
+    Args:
+        permissions (list): List of permission dicts from Frontegg
+        dry_run (bool): If True, only print what would be done without making API calls
+        verbose (bool): If True, print detailed information about each permission
+    """
+    global _permission_id_to_name
+    created_count = 0
+    failed_count = 0
+
+    for permission in permissions:
+        perm_name = permission.get("key") or permission.get("name", "")
+        perm_desc = permission.get("description") or permission.get("name", "")
+        perm_id = permission.get("id", "")
+
+        # Always populate the map, even in dry_run (needed for role resolution)
+        _permission_id_to_name[perm_id] = perm_name
+
+        if dry_run:
+            print(f"[DRY RUN] Would create permission: {perm_name}")
+            if verbose:
+                print(f"  ID: {perm_id}, Description: {perm_desc}")
+            continue
+
+        try:
+            descope_client.mgmt.permission.create(name=perm_name, description=perm_desc)
+            created_count += 1
+            if verbose:
+                logging.info(f"Created permission: {perm_name}")
+        except Exception as e:
+            logging.error(f"Failed to create permission {perm_name}: {e}")
+            failed_count += 1
+
+    if not dry_run:
+        print(f"Permissions: {created_count} created, {failed_count} failed")
+
+
+def write_roles(roles, dry_run, verbose):
+    """
+    Write roles to Descope and populate the _role_id_to_name map.
+
+    Resolves permission IDs to names using _permission_id_to_name map.
+    The role map is always populated even in dry_run mode so that
+    write_users() can resolve role IDs to names.
+
+    Args:
+        roles (list): List of role dicts from Frontegg
+        dry_run (bool): If True, only print what would be done without making API calls
+        verbose (bool): If True, print detailed information about each role
+    """
+    global _role_id_to_name
+    created_count = 0
+    failed_count = 0
+
+    for role in roles:
+        role_name = role.get("name", "")
+        role_desc = role.get("description", "")
+        role_id = role.get("id", "")
+        tenant_id = role.get("tenantId", "")  # Empty string = project-level role
+
+        # Resolve permission IDs to names
+        permission_names = []
+        for perm_ref in role.get("permissions", []):
+            resolved = _permission_id_to_name.get(perm_ref)
+            if resolved:
+                permission_names.append(resolved)
+            else:
+                logging.warning(
+                    f"Permission ID {perm_ref} not found in map for role {role_name}"
+                )
+
+        # Always populate the map, even in dry_run (needed for user resolution)
+        _role_id_to_name[role_id] = role_name
+
+        if dry_run:
+            print(f"[DRY RUN] Would create role: {role_name} (tenant: {tenant_id or 'project-level'})")
+            if verbose:
+                print(f"  ID: {role_id}, Permissions: {permission_names}")
+            continue
+
+        try:
+            descope_client.mgmt.role.create(
+                name=role_name,
+                description=role_desc,
+                permission_names=permission_names,
+                tenant_id=tenant_id,
+            )
+            created_count += 1
+            if verbose:
+                logging.info(f"Created role: {role_name}")
+        except Exception as e:
+            logging.error(f"Failed to create role {role_name}: {e}")
+            failed_count += 1
+
+    if not dry_run:
+        print(f"Roles: {created_count} created, {failed_count} failed")
+
+
+def write_users(users, dry_run, verbose):
+    """
+    Write users to Descope using a two-pass approach.
+
+    Pass 1: Batch create all users (without tenant associations).
+    Pass 2: Add tenant associations and tenant-specific roles for each user.
+
+    Passwords are silently skipped -- no password field is included in the
+    user payload and no per-user warning is printed.
+
+    Custom attributes defined in Frontegg are created in Descope before
+    the batch import.
+
+    Args:
+        users (list): List of user dicts from Frontegg
+        dry_run (bool): If True, only print what would be done without making API calls
+        verbose (bool): If True, print detailed information about each user
+    """
+    # Custom attributes to create in Descope for Frontegg-specific fields
+    FRONTEGG_CUSTOM_ATTRS = {
+        "fronteggId": "String",
+        "verified": "Boolean",
+        "metadata": "String",
+        "isLocked": "Boolean",
+        "mfaEnrolled": "Boolean",
+        "provider": "String",
+    }
+
+    if not dry_run:
+        create_custom_attributes_in_descope(FRONTEGG_CUSTOM_ATTRS)
+
+    # E.164 phone number regex for validation
+    e164_regex = re.compile(r"^\+[1-9]\d{1,14}$")
+
+    # Prepare user data structures
+    prepared_users = []  # For batch create
+    user_tenant_associations = []  # For pass 2
+
+    for user in users:
+        login_id = user.get("email") or user.get("id")
+        if not login_id:
+            logging.warning(f"Skipping user with no email or id: {user}")
+            continue
+
+        email = user.get("email")
+
+        # Display name: skip if it looks like an LDAP CN= value
+        display_name = user.get("name")
+        if display_name and "CN=" in display_name:
+            display_name = None
+
+        given_name = user.get("givenName")
+        family_name = user.get("familyName")
+
+        # Phone validation: must match E.164 format
+        raw_phone = user.get("phoneNumber") or user.get("mobilePhoneNumber")
+        if raw_phone and (raw_phone == "-" or not e164_regex.match(raw_phone)):
+            phone = None
+        else:
+            phone = raw_phone
+
+        picture = user.get("profilePictureUrl")
+        verified_email = bool(user.get("verified", False))
+
+        # Custom attributes from Frontegg
+        metadata_raw = user.get("metadata", {})
+        if isinstance(metadata_raw, dict):
+            metadata_str = json.dumps(metadata_raw)
+        else:
+            metadata_str = str(metadata_raw) if metadata_raw else ""
+
+        custom_attributes = {
+            "fronteggId": user.get("id", ""),
+            "verified": user.get("verified", False),
+            "metadata": metadata_str,
+            "isLocked": user.get("isLocked", False),
+            "mfaEnrolled": user.get("mfaEnrolled", False),
+            "provider": user.get("provider", "local"),
+        }
+        # Merge any additional custom attributes from Frontegg
+        extra_attrs = user.get("customAttributes", {})
+        if isinstance(extra_attrs, dict):
+            custom_attributes.update(extra_attrs)
+
+        # Project-level roles (roles without a tenantId)
+        project_role_names = []
+        for role in user.get("roles", []):
+            if not role.get("tenantId"):
+                resolved = _role_id_to_name.get(role.get("id"))
+                if resolved:
+                    project_role_names.append(resolved)
+
+        # Tenant associations with tenant-specific roles
+        user_tenants = []
+        for t in user.get("tenants", []):
+            tenant_id = t.get("tenantId") or t.get("id")
+            if not tenant_id:
+                continue
+            tenant_roles = []
+            for role in t.get("roles", []):
+                resolved = _role_id_to_name.get(role.get("id"))
+                if resolved:
+                    tenant_roles.append(resolved)
+            user_tenants.append({"tenant_id": tenant_id, "role_names": tenant_roles})
+
+        user_dict = {
+            "loginIds": [login_id],
+            "email": email,
+            "displayName": display_name,
+            "givenName": given_name,
+            "familyName": family_name,
+            "phone": phone,
+            "verifiedEmail": verified_email,
+            "picture": picture,
+            "roleNames": project_role_names,
+            "customAttributes": custom_attributes,
+        }
+
+        prepared_users.append(user_dict)
+        user_tenant_associations.append((login_id, user_tenants))
+
+    if dry_run:
+        total_tenant_assocs = sum(len(assocs) for _, assocs in user_tenant_associations)
+        print(f"[DRY RUN] Would create {len(prepared_users)} users")
+        print(f"[DRY RUN] Would create {total_tenant_assocs} tenant associations")
+        if verbose:
+            for ud in prepared_users:
+                login = ud["loginIds"][0] if ud["loginIds"] else "unknown"
+                print(f"  User: {login}, roles: {ud.get('roleNames', [])}")
+        return
+
+    # --- Pass 1: Batch create users ---
+    batch_size = 500
+    total_created = 0
+    total_failed = 0
+
+    for i in range(0, len(prepared_users), batch_size):
+        batch = prepared_users[i : i + batch_size]
+        try:
+            descope_client.mgmt.user.create_batch(
+                users=batch, invite=False, send_mail=False, send_sms=False
+            )
+            total_created += len(batch)
+            logging.info(f"Batch {i // batch_size + 1}: created {len(batch)} users")
+        except Exception as e:
+            logging.error(f"Failed to create user batch starting at index {i}: {e}")
+            total_failed += len(batch)
+
+    print(f"Users (batch create): {total_created} created, {total_failed} failed")
+
+    # --- Pass 2: Tenant associations ---
+    assoc_created = 0
+    assoc_failed = 0
+
+    for login_id, user_tenants in user_tenant_associations:
+        for assoc in user_tenants:
+            tenant_id = assoc["tenant_id"]
+            role_names = assoc["role_names"]
+
+            try:
+                descope_client.mgmt.user.add_tenant(
+                    login_id=login_id, tenant_id=tenant_id
+                )
+                assoc_created += 1
+            except Exception as e:
+                logging.error(
+                    f"Failed to add tenant {tenant_id} to user {login_id}: {e}"
+                )
+                assoc_failed += 1
+                continue
+
+            if role_names:
+                try:
+                    descope_client.mgmt.user.add_tenant_roles(
+                        login_id=login_id,
+                        tenant_id=tenant_id,
+                        role_names=role_names,
+                    )
+                except Exception as e:
+                    logging.error(
+                        f"Failed to add tenant roles for user {login_id} in tenant {tenant_id}: {e}"
+                    )
+
+    print(f"Tenant associations: {assoc_created} created, {assoc_failed} failed")
+
+
+# --- Top-level Orchestrator ---
+
+def migrate_frontegg(dry_run, verbose):
+    """
+    Orchestrate the full Frontegg-to-Descope migration.
+
+    Migration order (required for ID-to-name map dependencies):
+    1. Tenants
+    2. Permissions (populates _permission_id_to_name)
+    3. Roles (needs permissions map; populates _role_id_to_name)
+    4. Users (needs both maps for role/tenant resolution)
+
+    Args:
+        dry_run (bool): If True, only print what would be done without making API calls
+        verbose (bool): If True, print detailed information about each entity
+    """
+    token = get_frontegg_access_token()
+    if not token:
+        logging.error("Failed to obtain Frontegg access token. Exiting.")
+        print("ERROR: Failed to obtain Frontegg access token. Check credentials.")
+        return
+
+    print("Starting Frontegg to Descope migration...")
+    if dry_run:
+        print("[DRY RUN MODE] No changes will be written to Descope.")
+
+    # 1. Tenants (must come first -- users reference tenant IDs)
+    tenants = fetch_frontegg_tenants()
+    print(f"Fetched {len(tenants)} tenants from Frontegg")
+    write_tenants(tenants, dry_run, verbose)
+
+    # 2. Permissions (must come before roles -- roles reference permission IDs)
+    permissions = fetch_frontegg_permissions()
+    print(f"Fetched {len(permissions)} permissions from Frontegg")
+    write_permissions(permissions, dry_run, verbose)
+
+    # 3. Roles (must come before users -- users reference role IDs; needs _permission_id_to_name)
+    roles = fetch_frontegg_roles()
+    print(f"Fetched {len(roles)} roles from Frontegg")
+    write_roles(roles, dry_run, verbose)
+
+    # 4. Users (after roles; needs _role_id_to_name for two-pass write)
+    users = fetch_frontegg_users()
+    print(f"Fetched {len(users)} users from Frontegg")
+    write_users(users, dry_run, verbose)
+
+    print("Frontegg migration complete.")
