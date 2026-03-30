@@ -6,6 +6,13 @@ import re
 import time
 from dotenv import load_dotenv
 from descope import UserObj
+from descope.management.sso_settings import (
+    SSOSAMLSettings,
+    SSOOIDCSettings,
+    RoleMapping,
+    AttributeMapping,
+    OIDCAttributeMapping,
+)
 from setup import initialize_descope
 from utils import api_request_with_retry, create_custom_attributes_in_descope
 
@@ -730,21 +737,23 @@ def write_sso(tenants, dry_run, verbose):
                         migrated += 1
                         continue
 
-                    descope_client.mgmt.saml.configure_for_tenant(
+                    saml_role_mappings = [RoleMapping(groups=[rm["groups"][0]], role_name=rm["roleName"]) for rm in role_mappings]
+                    saml_settings = SSOSAMLSettings(
+                        idp_url=sso.get("ssoEndpoint", ""),
+                        idp_entity_id=sso.get("spEntityId") or "Token-Security",
+                        idp_cert=sso.get("publicCertificate", ""),
+                        attribute_mapping=AttributeMapping(
+                            email="email",
+                            given_name="firstName",
+                            family_name="lastName",
+                            group="groups",
+                        ),
+                        role_mappings=saml_role_mappings,
+                        default_sso_roles=default_roles,
+                    )
+                    descope_client.mgmt.sso.configure_saml_settings(
                         tenant_id=tenant_id,
-                        settings={
-                            "entityId": sso.get("spEntityId") or "Token-Security",
-                            "idpUrl": sso.get("ssoEndpoint"),
-                            "idpCert": sso.get("publicCertificate"),
-                            "roleMappings": role_mappings,
-                            "defaultSSORoles": default_roles,
-                            "attributeMapping": {
-                                "email": "email",
-                                "givenName": "firstName",
-                                "familyName": "lastName",
-                                "group": "groups",
-                            },
-                        },
+                        settings=saml_settings,
                         domains=domains,
                     )
                     migrated += 1
@@ -757,21 +766,20 @@ def write_sso(tenants, dry_run, verbose):
                         migrated += 1
                         continue
 
-                    descope_client.mgmt.oidc.configure_for_tenant(
+                    oidc_settings = SSOOIDCSettings(
+                        name=tenant_name,
+                        client_id=sso.get("oidcClientId") or sso.get("idpClientId", ""),
+                        client_secret=sso.get("oidcSecret") or sso.get("idpClientSecret"),
+                        attribute_mapping=OIDCAttributeMapping(
+                            login_id="email",
+                            email="email",
+                            given_name="firstName",
+                            family_name="lastName",
+                        ),
+                    )
+                    descope_client.mgmt.sso.configure_oidc_settings(
                         tenant_id=tenant_id,
-                        settings={
-                            "clientId": sso.get("oidcClientId") or sso.get("idpClientId"),
-                            "clientSecret": sso.get("oidcSecret") or sso.get("idpClientSecret"),
-                            "roleMappings": role_mappings,
-                            "defaultSSORoles": default_roles,
-                            "userAttrMapping": {
-                                "loginId": "email",
-                                "email": "email",
-                                "givenName": "firstName",
-                                "familyName": "lastName",
-                                "group": "groups",
-                            },
-                        },
+                        settings=oidc_settings,
                         domains=domains,
                     )
                     migrated += 1
