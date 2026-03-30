@@ -14,3 +14,6 @@ logs/*
 
 .env
 .DS_Store
+
+.planning/
+.claude/
