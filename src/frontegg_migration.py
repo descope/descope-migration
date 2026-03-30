@@ -338,9 +338,16 @@ def write_permissions(permissions, dry_run, verbose):
         perm_name = permission.get("key") or permission.get("name", "")
         perm_desc = permission.get("description") or permission.get("name", "")
         perm_id = permission.get("id", "")
+        is_builtin = permission.get("fePermission", False)
 
-        # Always populate the map, even in dry_run (needed for role resolution)
+        # Always populate the map, even for built-ins and dry_run (needed for role resolution)
         _permission_id_to_name[perm_id] = perm_name
+
+        # Skip built-in Frontegg permissions — only migrate custom ones
+        if is_builtin:
+            if verbose:
+                logging.debug(f"Skipping built-in Frontegg permission: {perm_name}")
+            continue
 
         if dry_run:
             print(f"[DRY RUN] Would create permission: {perm_name}")
