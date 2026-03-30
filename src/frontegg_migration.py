@@ -615,6 +615,180 @@ def write_users(users, dry_run, verbose):
     print(f"Tenant associations: {assoc_created} created, {assoc_failed} failed")
 
 
+# --- SSO Migration ---
+
+def get_frontegg_tenant_token(tenant_id):
+    """
+    Get a tenant-scoped admin token from Frontegg by passing tenantId to the auth endpoint.
+
+    Args:
+        tenant_id (str): The Frontegg tenant ID
+
+    Returns:
+        str or None: Tenant-scoped access token
+    """
+    token_url = "https://api.frontegg.com/auth/vendor"
+    payload = {
+        "clientId": FRONTEGG_CLIENT_ID,
+        "secret": FRONTEGG_SECRET_KEY,
+        "tenantId": tenant_id,
+    }
+    response = requests.post(token_url, json=payload, headers={"Content-Type": "application/json"})
+    if response.status_code == 200:
+        data = response.json()
+        return data.get("token") or data.get("accessToken")
+    else:
+        logging.error(f"Failed to get tenant token for {tenant_id}: {response.text}")
+        return None
+
+
+def fetch_tenant_sso_settings(tenant_id):
+    """
+    Fetch SSO configurations for a specific tenant using a tenant-scoped token.
+
+    Args:
+        tenant_id (str): The Frontegg tenant ID
+
+    Returns:
+        list: SSO configuration objects for this tenant
+    """
+    tenant_token = get_frontegg_tenant_token(tenant_id)
+    if not tenant_token:
+        return []
+
+    url = "https://api.frontegg.com/frontegg/team/resources/sso/v1/configurations"
+    headers = {
+        "Authorization": f"Bearer {tenant_token}",
+        "Content-Type": "application/json",
+        "frontegg-tenant-id": tenant_id,
+    }
+    response = api_request_with_retry("get", url, headers)
+    if not response:
+        logging.error(f"Failed to fetch SSO settings for tenant {tenant_id}")
+        return []
+
+    data = response.json()
+    return data if isinstance(data, list) else []
+
+
+def write_sso(tenants, dry_run, verbose):
+    """
+    Migrate SSO settings (SAML and OIDC) for each tenant from Frontegg to Descope.
+
+    Fetches per-tenant SSO configs using a tenant-scoped token, then creates
+    the equivalent configuration in Descope. Skips disabled configs.
+
+    Args:
+        tenants (list): List of tenant dicts from Frontegg
+        dry_run (bool): If True, only print what would be done
+        verbose (bool): If True, print detailed info
+    """
+    migrated = 0
+    failed = 0
+    skipped = 0
+
+    for tenant in tenants:
+        tenant_id = tenant.get("tenantId") or tenant.get("id")
+        tenant_name = tenant.get("name", tenant_id)
+        if not tenant_id:
+            continue
+
+        sso_configs = fetch_tenant_sso_settings(tenant_id)
+        if not sso_configs:
+            continue
+
+        for sso in sso_configs:
+            if not sso.get("enabled"):
+                skipped += 1
+                continue
+
+            sso_type = sso.get("type", "").lower()
+            domains = [d.get("domain") for d in sso.get("domains", []) if d.get("domain")]
+
+            # Resolve role IDs to names using existing map
+            default_roles = []
+            for role_id in sso.get("roleIds", []):
+                name = _role_id_to_name.get(role_id)
+                if name:
+                    default_roles.append(name)
+
+            # Build role mappings from SSO groups
+            role_mappings = []
+            for group in sso.get("groups", []):
+                if not group.get("enabled"):
+                    continue
+                group_name = group.get("group")
+                for role_id in group.get("roleIds", []):
+                    role_name = _role_id_to_name.get(role_id)
+                    if role_name and group_name:
+                        role_mappings.append({"groups": [group_name], "roleName": role_name})
+
+            try:
+                if sso_type == "saml":
+                    if dry_run:
+                        print(f"[DRY RUN] Would create SAML SSO for tenant: {tenant_name} (domains: {domains})")
+                        migrated += 1
+                        continue
+
+                    descope_client.mgmt.saml.configure_for_tenant(
+                        tenant_id=tenant_id,
+                        settings={
+                            "entityId": sso.get("spEntityId") or "Token-Security",
+                            "idpUrl": sso.get("ssoEndpoint"),
+                            "idpCert": sso.get("publicCertificate"),
+                            "roleMappings": role_mappings,
+                            "defaultSSORoles": default_roles,
+                            "attributeMapping": {
+                                "email": "email",
+                                "givenName": "firstName",
+                                "familyName": "lastName",
+                                "group": "groups",
+                            },
+                        },
+                        domains=domains,
+                    )
+                    migrated += 1
+                    if verbose:
+                        logging.info(f"Created SAML SSO for tenant: {tenant_name}")
+
+                elif sso_type == "oidc":
+                    if dry_run:
+                        print(f"[DRY RUN] Would create OIDC SSO for tenant: {tenant_name} (domains: {domains})")
+                        migrated += 1
+                        continue
+
+                    descope_client.mgmt.oidc.configure_for_tenant(
+                        tenant_id=tenant_id,
+                        settings={
+                            "clientId": sso.get("oidcClientId") or sso.get("idpClientId"),
+                            "clientSecret": sso.get("oidcSecret") or sso.get("idpClientSecret"),
+                            "roleMappings": role_mappings,
+                            "defaultSSORoles": default_roles,
+                            "userAttrMapping": {
+                                "loginId": "email",
+                                "email": "email",
+                                "givenName": "firstName",
+                                "familyName": "lastName",
+                                "group": "groups",
+                            },
+                        },
+                        domains=domains,
+                    )
+                    migrated += 1
+                    if verbose:
+                        logging.info(f"Created OIDC SSO for tenant: {tenant_name}")
+
+                else:
+                    logging.warning(f"Unknown SSO type '{sso_type}' for tenant {tenant_name}, skipping")
+                    skipped += 1
+
+            except Exception as e:
+                logging.error(f"Failed to migrate {sso_type.upper()} SSO for tenant {tenant_name}: {e}")
+                failed += 1
+
+    print(f"SSO: {migrated} migrated, {failed} failed, {skipped} skipped (disabled)")
+
+
 # --- Top-level Orchestrator ---
 
 def migrate_frontegg(dry_run, verbose):
@@ -656,7 +830,11 @@ def migrate_frontegg(dry_run, verbose):
     print(f"Fetched {len(roles)} roles from Frontegg")
     write_roles(roles, dry_run, verbose)
 
-    # 4. Users (after roles; needs _role_id_to_name for two-pass write)
+    # 4. SSO (after roles -- needs _role_id_to_name for role mapping)
+    print("Migrating SSO settings per tenant...")
+    write_sso(tenants, dry_run, verbose)
+
+    # 5. Users (after roles; needs _role_id_to_name for two-pass write)
     users = fetch_frontegg_users()
     print(f"Fetched {len(users)} users from Frontegg")
     write_users(users, dry_run, verbose)
