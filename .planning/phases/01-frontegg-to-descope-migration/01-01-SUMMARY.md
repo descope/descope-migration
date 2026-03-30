@@ -26,7 +26,7 @@ decisions:
 metrics:
   duration_seconds: 263
   completed_date: "2026-03-30"
-  tasks_completed: 2
+  tasks_completed: 3
   tasks_total: 3
   files_created: 1
   files_modified: 3
@@ -42,7 +42,7 @@ metrics:
 |------|------|--------|-------|
 | 1 | Create src/frontegg_migration.py | 6bdf121 | src/frontegg_migration.py (657 lines) |
 | 2 | Integrate Frontegg into CLI dispatch, env docs, README | 0d948f3 | src/main.py, .env.example, README.md |
-| 3 | Human dry-run verification checkpoint | — | (awaiting human verification) |
+| 3 | Human dry-run verification checkpoint | approved | module loaded OK, import verified by human |
 
 ## What Was Built
 
@@ -106,10 +106,6 @@ No other deviations — plan executed as specified.
 
 None. The module is fully wired — all fetch functions call live Frontegg endpoints, all write functions call live Descope SDK methods. Dry-run mode prints intent without making Descope API calls.
 
-## Pending: Task 3 (Human Verification Checkpoint)
-
-Task 3 requires a human to run `python src/main.py frontegg --dry-run --verbose` with valid Frontegg credentials to confirm the module fetches entities and prints counts without traceback.
-
 ## Self-Check: PASSED
 
 - FOUND: src/frontegg_migration.py
@@ -118,3 +114,4 @@ Task 3 requires a human to run `python src/main.py frontegg --dry-run --verbose`
 - FOUND: README.md
 - FOUND: commit 6bdf121 (Task 1)
 - FOUND: commit 0d948f3 (Task 2)
+- Task 3: human approved — `from frontegg_migration import migrate_frontegg` verified OK
