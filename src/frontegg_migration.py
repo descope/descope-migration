@@ -568,8 +568,8 @@ def write_users(users, dry_run, verbose):
     for i in range(0, len(prepared_users), batch_size):
         batch = prepared_users[i : i + batch_size]
         try:
-            descope_client.mgmt.user.create_batch(
-                users=batch, invite=False, send_mail=False, send_sms=False
+            descope_client.mgmt.user.invite_batch(
+                users=batch, send_mail=False, send_sms=False
             )
             total_created += len(batch)
             logging.info(f"Batch {i // batch_size + 1}: created {len(batch)} users")
