@@ -5,6 +5,7 @@ import json
 import re
 import time
 from dotenv import load_dotenv
+from descope import UserObj
 from setup import initialize_descope
 from utils import api_request_with_retry, create_custom_attributes_in_descope
 
@@ -534,20 +535,20 @@ def write_users(users, dry_run, verbose):
                     tenant_roles.append(resolved)
             user_tenants.append({"tenant_id": tenant_id, "role_names": tenant_roles})
 
-        user_dict = {
-            "loginIds": [login_id],
-            "email": email,
-            "displayName": display_name,
-            "givenName": given_name,
-            "familyName": family_name,
-            "phone": phone,
-            "verifiedEmail": verified_email,
-            "picture": picture,
-            "roleNames": project_role_names,
-            "customAttributes": custom_attributes,
-        }
+        user_obj = UserObj(
+            login_id=login_id,
+            email=email,
+            display_name=display_name,
+            given_name=given_name,
+            family_name=family_name,
+            phone=phone,
+            verified_email=verified_email,
+            picture=picture,
+            role_names=project_role_names,
+            custom_attributes=custom_attributes,
+        )
 
-        prepared_users.append(user_dict)
+        prepared_users.append(user_obj)
         user_tenant_associations.append((login_id, user_tenants))
 
     if dry_run:
@@ -556,8 +557,7 @@ def write_users(users, dry_run, verbose):
         print(f"[DRY RUN] Would create {total_tenant_assocs} tenant associations")
         if verbose:
             for ud in prepared_users:
-                login = ud["loginIds"][0] if ud["loginIds"] else "unknown"
-                print(f"  User: {login}, roles: {ud.get('roleNames', [])}")
+                print(f"  User: {ud.login_id}, roles: {ud.role_names}")
         return
 
     # --- Pass 1: Batch create users ---
