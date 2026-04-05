@@ -1,4 +1,5 @@
 import os
+import base64
 import logging
 import requests
 import json
@@ -678,6 +679,42 @@ def fetch_tenant_sso_settings(tenant_id):
     return data if isinstance(data, list) else []
 
 
+def _derive_entity_id_from_sso_url(sso_url: str, frontegg_entity_id: str | None = None) -> str:
+    """Derive the IdP entity ID from the SSO URL for known providers.
+
+    Falls back to frontegg_entity_id for unrecognized providers.
+    """
+    from urllib.parse import urlparse
+    parsed = urlparse(sso_url)
+    host = parsed.hostname or ""
+
+    # Okta: https://<domain>.okta.com/app/<app_name>/<app_key>/sso/saml
+    #        -> http://www.okta.com/<app_key>
+    if ".okta.com" in host:
+        parts = [p for p in parsed.path.split("/") if p]
+        # path: ['app', '<app_name>', '<app_key>', 'sso', 'saml']
+        if len(parts) >= 3 and parts[0] == "app":
+            app_key = parts[2]
+            return f"http://www.okta.com/{app_key}"
+
+    # Azure AD: https://login.microsoftonline.com/<tenant_id>/saml2
+    #            -> https://sts.windows.net/<tenant_id>/
+    if host == "login.microsoftonline.com":
+        parts = [p for p in parsed.path.split("/") if p]
+        # path: ['<tenant_id>', 'saml2']
+        if len(parts) >= 1:
+            tenant_id = parts[0]
+            return f"https://sts.windows.net/{tenant_id}/"
+
+    # JumpCloud: https://sso.jumpcloud.com/saml2/<app>
+    #             -> SP entity ID (configured in Descope, set via SAML_SP_ENTITY_ID)
+    if host == "sso.jumpcloud.com":
+        return os.getenv("SAML_SP_ENTITY_ID", "")
+
+    # Unknown provider: fall back to what Frontegg has stored
+    return frontegg_entity_id or ""
+
+
 def write_sso(tenants, dry_run, verbose):
     """
     Migrate SSO settings (SAML and OIDC) for each tenant from Frontegg to Descope.
@@ -740,8 +777,8 @@ def write_sso(tenants, dry_run, verbose):
                     saml_role_mappings = [RoleMapping(groups=[rm["groups"][0]], role_name=rm["roleName"]) for rm in role_mappings]
                     saml_settings = SSOSAMLSettings(
                         idp_url=sso.get("ssoEndpoint", ""),
-                        idp_entity_id=sso.get("spEntityId") or "Token-Security",
-                        idp_cert=sso.get("publicCertificate", ""),
+                        idp_entity_id=_derive_entity_id_from_sso_url(sso.get("ssoEndpoint", ""), sso.get("entityId")),
+                        idp_cert=base64.b64decode(sso.get("publicCertificate", "")).decode("utf-8") if sso.get("publicCertificate") else "",
                         attribute_mapping=AttributeMapping(
                             email="email",
                             given_name="firstName",
@@ -750,6 +787,8 @@ def write_sso(tenants, dry_run, verbose):
                         ),
                         role_mappings=saml_role_mappings,
                         default_sso_roles=default_roles,
+                        sp_acs_url=os.getenv("SAML_SP_ACS_URL", ""),
+                        sp_entity_id=os.getenv("SAML_SP_ENTITY_ID", "")
                     )
                     descope_client.mgmt.sso.configure_saml_settings(
                         tenant_id=tenant_id,
