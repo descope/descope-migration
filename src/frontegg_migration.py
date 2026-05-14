@@ -711,7 +711,7 @@ def _derive_entity_id(sso_url: str, fallback: str | None = None) -> str:
 
     # Okta: https://<domain>.okta.com/app/<app_name>/<app_key>/sso/saml
     #        -> http://www.okta.com/<app_key>
-    if ".okta.com" in host:
+    if host and (host == "okta.com" or host.endswith(".okta.com")):
         parts = [p for p in parsed.path.split("/") if p]
         if len(parts) >= 3 and parts[0] == "app":
             return f"http://www.okta.com/{parts[2]}"
