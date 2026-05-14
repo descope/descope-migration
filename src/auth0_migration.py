@@ -997,10 +997,11 @@ def _derive_idp_entity_id(url: str) -> str:
     if not url:
         return ""
     parsed = urlparse(url)
-    host = parsed.hostname or ""
+    host = (parsed.hostname or "").lower()
     parts = [p for p in parsed.path.split("/") if p]
+    is_okta_host = host == "okta.com" or host.endswith(".okta.com")
 
-    if ".okta.com" in host and parts and parts[0] == "app":
+    if is_okta_host and parts and parts[0] == "app":
         # metadata URL: /app/<app_key>/sso/saml/metadata  -> parts[1]
         # SSO URL:      /app/<app_name>/<app_key>/sso/saml -> parts[2]
         if len(parts) >= 4 and parts[2] == "sso":
