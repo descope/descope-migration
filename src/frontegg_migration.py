@@ -327,21 +327,29 @@ def write_tenants(tenants, dry_run, verbose):
         print(f"Tenants: {created_count} created, {failed_count} failed")
 
 
-def write_permissions(permissions, dry_run, verbose):
+def write_permissions(permissions, dry_run, verbose, referenced_perm_ids=None):
     """
     Write permissions to Descope and populate the _permission_id_to_name map.
 
     Note: The map is always populated even in dry_run mode so that
     write_roles() can resolve permission IDs to names.
 
+    Built-in Frontegg permissions are normally skipped, but if referenced_perm_ids
+    is provided, any built-in permission whose ID appears in that set will be created
+    in Descope so that roles referencing it don't fail.
+
     Args:
         permissions (list): List of permission dicts from Frontegg
         dry_run (bool): If True, only print what would be done without making API calls
         verbose (bool): If True, print detailed information about each permission
+        referenced_perm_ids (set|None): Permission IDs actually used by roles; built-ins
+            in this set will be created even though they are Frontegg built-ins.
     """
     global _permission_id_to_name
     created_count = 0
     failed_count = 0
+    skipped_count = 0
+    already_created_names = set()  # deduplicate by name across all 20k+ permissions
 
     for permission in permissions:
         perm_name = permission.get("key") or permission.get("name", "")
@@ -352,11 +360,16 @@ def write_permissions(permissions, dry_run, verbose):
         # Always populate the map, even for built-ins and dry_run (needed for role resolution)
         _permission_id_to_name[perm_id] = perm_name
 
-        # Skip built-in Frontegg permissions — only migrate custom ones
-        if is_builtin:
+        # Skip built-in Frontegg permissions unless a role actually references them
+        if is_builtin and (referenced_perm_ids is None or perm_id not in referenced_perm_ids):
             if verbose:
                 logging.debug(f"Skipping built-in Frontegg permission: {perm_name}")
             continue
+
+        # Deduplicate: Frontegg can have many IDs sharing the same permission name
+        if perm_name in already_created_names:
+            continue
+        already_created_names.add(perm_name)
 
         if dry_run:
             print(f"[DRY RUN] Would create permission: {perm_name}")
@@ -370,11 +383,18 @@ def write_permissions(permissions, dry_run, verbose):
             if verbose:
                 logging.info(f"Created permission: {perm_name}")
         except Exception as e:
-            logging.error(f"Failed to create permission {perm_name}: {e}")
-            failed_count += 1
+            err_str = str(e)
+            if "E024104" in err_str or "already exist" in err_str.lower():
+                # Permission already exists in Descope — treat as success
+                skipped_count += 1
+                if verbose:
+                    logging.info(f"Permission already exists, skipping: {perm_name}")
+            else:
+                logging.error(f"Failed to create permission {perm_name}: {e}")
+                failed_count += 1
 
     if not dry_run:
-        print(f"Permissions: {created_count} created, {failed_count} failed")
+        print(f"Permissions: {created_count} created, {skipped_count} already existed, {failed_count} failed")
 
 
 def write_roles(roles, dry_run, verbose):
@@ -679,10 +699,11 @@ def fetch_tenant_sso_settings(tenant_id):
     return data if isinstance(data, list) else []
 
 
-def _derive_entity_id_from_sso_url(sso_url: str, frontegg_entity_id: str | None = None) -> str:
+def _derive_entity_id(sso_url: str, fallback: str | None = None) -> str:
     """Derive the IdP entity ID from the SSO URL for known providers.
 
-    Falls back to frontegg_entity_id for unrecognized providers.
+    Supports Okta, Azure AD, and JumpCloud. Falls back to `fallback` for
+    unrecognized providers.
     """
     from urllib.parse import urlparse
     parsed = urlparse(sso_url)
@@ -692,41 +713,26 @@ def _derive_entity_id_from_sso_url(sso_url: str, frontegg_entity_id: str | None 
     #        -> http://www.okta.com/<app_key>
     if ".okta.com" in host:
         parts = [p for p in parsed.path.split("/") if p]
-        # path: ['app', '<app_name>', '<app_key>', 'sso', 'saml']
         if len(parts) >= 3 and parts[0] == "app":
-            app_key = parts[2]
-            return f"http://www.okta.com/{app_key}"
+            return f"http://www.okta.com/{parts[2]}"
 
     # Azure AD: https://login.microsoftonline.com/<tenant_id>/saml2
     #            -> https://sts.windows.net/<tenant_id>/
     if host == "login.microsoftonline.com":
         parts = [p for p in parsed.path.split("/") if p]
-        # path: ['<tenant_id>', 'saml2']
-        if len(parts) >= 1:
-            tenant_id = parts[0]
-            return f"https://sts.windows.net/{tenant_id}/"
+        if parts:
+            return f"https://sts.windows.net/{parts[0]}/"
 
     # JumpCloud: https://sso.jumpcloud.com/saml2/<app>
-    #             -> SP entity ID (configured in Descope, set via SAML_SP_ENTITY_ID)
+    #             -> SP entity ID configured in Descope
     if host == "sso.jumpcloud.com":
-        return os.getenv("SAML_SP_ENTITY_ID", "")
+        return os.getenv("FRONTEGG_SAML_SP_ENTITY_ID", "")
 
-    # Unknown provider: fall back to what Frontegg has stored
-    return frontegg_entity_id or ""
+    return fallback or ""
 
 
 def write_sso(tenants, dry_run, verbose):
-    """
-    Migrate SSO settings (SAML and OIDC) for each tenant from Frontegg to Descope.
-
-    Fetches per-tenant SSO configs using a tenant-scoped token, then creates
-    the equivalent configuration in Descope. Skips disabled configs.
-
-    Args:
-        tenants (list): List of tenant dicts from Frontegg
-        dry_run (bool): If True, only print what would be done
-        verbose (bool): If True, print detailed info
-    """
+    """Migrate SSO settings (SAML and OIDC) for each Frontegg tenant to Descope."""
     migrated = 0
     failed = 0
     skipped = 0
@@ -749,14 +755,12 @@ def write_sso(tenants, dry_run, verbose):
             sso_type = sso.get("type", "").lower()
             domains = [d.get("domain") for d in sso.get("domains", []) if d.get("domain")]
 
-            # Resolve role IDs to names using existing map
-            default_roles = []
-            for role_id in sso.get("roleIds", []):
-                name = _role_id_to_name.get(role_id)
-                if name:
-                    default_roles.append(name)
+            default_roles = [
+                _role_id_to_name[role_id]
+                for role_id in sso.get("roleIds", [])
+                if role_id in _role_id_to_name
+            ]
 
-            # Build role mappings from SSO groups
             role_mappings = []
             for group in sso.get("groups", []):
                 if not group.get("enabled"):
@@ -777,7 +781,7 @@ def write_sso(tenants, dry_run, verbose):
                     saml_role_mappings = [RoleMapping(groups=[rm["groups"][0]], role_name=rm["roleName"]) for rm in role_mappings]
                     saml_settings = SSOSAMLSettings(
                         idp_url=sso.get("ssoEndpoint", ""),
-                        idp_entity_id=_derive_entity_id_from_sso_url(sso.get("ssoEndpoint", ""), sso.get("entityId")),
+                        idp_entity_id=_derive_entity_id(sso.get("ssoEndpoint", ""), sso.get("entityId")),
                         idp_cert=base64.b64decode(sso.get("publicCertificate", "")).decode("utf-8") if sso.get("publicCertificate") else "",
                         attribute_mapping=AttributeMapping(
                             email="email",
@@ -787,8 +791,8 @@ def write_sso(tenants, dry_run, verbose):
                         ),
                         role_mappings=saml_role_mappings,
                         default_sso_roles=default_roles,
-                        sp_acs_url=os.getenv("SAML_SP_ACS_URL", ""),
-                        sp_entity_id=os.getenv("SAML_SP_ENTITY_ID", "")
+                        sp_acs_url=os.getenv("FRONTEGG_SAML_SP_ACS_URL", ""),
+                        sp_entity_id=os.getenv("FRONTEGG_SAML_SP_ENTITY_ID", ""),
                     )
                     descope_client.mgmt.sso.configure_saml_settings(
                         tenant_id=tenant_id,
@@ -838,7 +842,7 @@ def write_sso(tenants, dry_run, verbose):
 
 # --- Top-level Orchestrator ---
 
-def migrate_frontegg(dry_run, verbose):
+def migrate_frontegg(dry_run, verbose, with_sso=False):
     """
     Orchestrate the full Frontegg-to-Descope migration.
 
@@ -851,6 +855,7 @@ def migrate_frontegg(dry_run, verbose):
     Args:
         dry_run (bool): If True, only print what would be done without making API calls
         verbose (bool): If True, print detailed information about each entity
+        with_sso (bool): If True, also migrate SSO settings for each tenant
     """
     token = get_frontegg_access_token()
     if not token:
@@ -870,16 +875,25 @@ def migrate_frontegg(dry_run, verbose):
     # 2. Permissions (must come before roles -- roles reference permission IDs)
     permissions = fetch_frontegg_permissions()
     print(f"Fetched {len(permissions)} permissions from Frontegg")
-    write_permissions(permissions, dry_run, verbose)
 
-    # 3. Roles (must come before users -- users reference role IDs; needs _permission_id_to_name)
+    # 3. Roles — fetched early so we know which permission IDs are actually needed
     roles = fetch_frontegg_roles()
     print(f"Fetched {len(roles)} roles from Frontegg")
+
+    # Collect all permission IDs referenced by roles so built-ins used by roles get created
+    referenced_perm_ids = {
+        perm_id
+        for role in roles
+        for perm_id in role.get("permissions", [])
+    }
+    write_permissions(permissions, dry_run, verbose, referenced_perm_ids=referenced_perm_ids)
+
     write_roles(roles, dry_run, verbose)
 
     # 4. SSO (after roles -- needs _role_id_to_name for role mapping)
-    print("Migrating SSO settings per tenant...")
-    write_sso(tenants, dry_run, verbose)
+    if with_sso:
+        print("Migrating SSO settings per tenant...")
+        write_sso(tenants, dry_run, verbose)
 
     # 5. Users (after roles; needs _role_id_to_name for two-pass write)
     users = fetch_frontegg_users()
