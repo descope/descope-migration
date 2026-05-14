@@ -1025,35 +1025,6 @@ def _derive_idp_entity_id(url: str) -> str:
     return url  # fall back to the URL itself (e.g. issuer field)
 
 
-def fetch_auth0_sp_metadata(client_id: str) -> dict:
-    """Fetch the SP entity ID and ACS URL from Auth0's public SAML metadata endpoint.
-
-    Args:
-        client_id: The Auth0 client ID from connection options (idpinitiated.client_id)
-
-    Returns:
-        dict with sp_entity_id and sp_acs_url, or empty strings on failure.
-    """
-    import xml.etree.ElementTree as ET
-    import requests as _requests
-
-    url = f"{AUTH0_DOMAIN}/samlp/metadata/{client_id}"
-    try:
-        response = _requests.get(url, timeout=10)
-        response.raise_for_status()
-        root = ET.fromstring(response.text)
-        ns = {
-            "md": "urn:oasis:names:tc:SAML:2.0:metadata",
-        }
-        entity_id = root.attrib.get("entityID", "")
-        acs_el = root.find(".//md:AssertionConsumerService", ns)
-        acs_url = acs_el.attrib.get("Location", "") if acs_el is not None else ""
-        return {"sp_entity_id": entity_id, "sp_acs_url": acs_url}
-    except Exception as e:
-        logging.warning(f"Failed to fetch Auth0 SP metadata for client {client_id}: {e}")
-        return {"sp_entity_id": "", "sp_acs_url": ""}
-
-
 def fetch_auth0_connection(connection_id):
     """
     Fetch a single Auth0 connection by ID to get its full SSO options.
