@@ -568,10 +568,23 @@ def add_descope_user_to_tenant(tenant, loginId):
 _NON_SSO_STRATEGIES = frozenset({"auth0", "email", "sms", ""})
 
 
+def _get_connection_strategy(conn_entry):
+    """
+    Return the connection strategy from either supported Auth0 response shape.
+
+    Some Auth0 endpoints return the strategy nested under "connection", while
+    others return it at the top level of the connection entry.
+    """
+    return (
+        conn_entry.get("connection", {}).get("strategy")
+        or conn_entry.get("strategy", "")
+    )
+
+
 def _org_has_sso(org_connections):
     """Return True if the org has at least one enterprise/SSO connection."""
     for conn_entry in org_connections:
-        strategy = conn_entry.get("connection", {}).get("strategy", "")
+        strategy = _get_connection_strategy(conn_entry)
         if strategy not in _NON_SSO_STRATEGIES:
             return True
     return False
