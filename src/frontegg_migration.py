@@ -124,12 +124,9 @@ def fetch_frontegg_tenants():
 
         data = response.json()
         if isinstance(data, dict):
-            items = data.get("items", data) if "items" in data else list(data.values()) if data else []
-            # Prefer items key; if not present treat entire dict as single item is wrong,
-            # handle gracefully
-            items = data.get("items", [])
-            if not items and isinstance(data, dict):
-                # Might be a bare list wrapped in dict without "items"
+            if "items" in data:
+                items = data.get("items", [])
+            else:
                 items = data.get("data", [])
         else:
             items = data if isinstance(data, list) else []
