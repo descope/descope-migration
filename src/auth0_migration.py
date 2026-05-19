@@ -19,7 +19,7 @@ from descope.management.sso_settings import (
     SSOOIDCSettings,
     AttributeMapping as SSOAttributeMapping,
     OIDCAttributeMapping,
-    RoleMapping as SSOROleMapping,
+    RoleMapping as SSORoleMapping,
 )
 
 from setup import initialize_descope
@@ -66,8 +66,8 @@ def fetch_auth0_users_from_file(file_path):
                 f"https://{AUTH0_TENANT_ID}.{AUTH0_REGION}.auth0.com/api/v2/users?page={page}&per_page={per_page}&q=user_id:\"{user['user_id']}\"",
                 headers=headers,
             )
-            if not response or response.status_code != 200:
-                logging.error(f"Error fetching Auth0 users. Status code: {response.status_code if response else 'no response'}")
+            if response is None or response.status_code != 200:
+                logging.error(f"Error fetching Auth0 users. Status code: {response.status_code if response is not None else 'no response'}")
                 break  # Consider breaking instead of returning to continue with the next user
             users_from_api = response.json()
             if not users_from_api:
@@ -93,9 +93,9 @@ def fetch_auth0_users():
             f"https://{AUTH0_TENANT_ID}.{AUTH0_REGION}.auth0.com/api/v2/users?page={page}&per_page={per_page}",
             headers=headers,
         )
-        if not response or response.status_code != 200:
+        if response is None or response.status_code != 200:
             logging.error(
-                f"Error fetching Auth0 users. Status code: {response.status_code if response else 'no response'}"
+                f"Error fetching Auth0 users. Status code: {response.status_code if response is not None else 'no response'}"
             )
             return all_users
         users = response.json()
@@ -123,9 +123,9 @@ def fetch_auth0_roles():
             f"https://{AUTH0_TENANT_ID}.{AUTH0_REGION}.auth0.com/api/v2/roles?page={page}&per_page={per_page}",
             headers=headers,
         )
-        if not response or response.status_code != 200:
+        if response is None or response.status_code != 200:
             logging.error(
-                f"Error fetching Auth0 roles. Status code: {response.status_code if response else 'no response'}"
+                f"Error fetching Auth0 roles. Status code: {response.status_code if response is not None else 'no response'}"
             )
             return all_roles
         roles = response.json()
@@ -154,9 +154,9 @@ def get_users_in_role(role):
             f"https://{AUTH0_TENANT_ID}.{AUTH0_REGION}.auth0.com/api/v2/roles/{role}/users?page={page}&per_page={per_page}",
             headers=headers,
         )
-        if not response or response.status_code != 200:
+        if response is None or response.status_code != 200:
             logging.error(
-                f"Error fetching Auth0 users in roles. Status code: {response.status_code if response else 'no response'}"
+                f"Error fetching Auth0 users in roles. Status code: {response.status_code if response is not None else 'no response'}"
             )
             return all_users
         users = response.json()
@@ -187,9 +187,9 @@ def get_permissions_for_role(role):
             f"https://{AUTH0_TENANT_ID}.{AUTH0_REGION}.auth0.com/api/v2/roles/{role}/permissions?per_page={per_page}&page={page}",
             headers=headers,
         )
-        if not response or response.status_code != 200:
+        if response is None or response.status_code != 200:
             logging.error(
-                f"Error fetching Auth0 permissions in roles. Status code: {response.status_code if response else 'no response'}"
+                f"Error fetching Auth0 permissions in roles. Status code: {response.status_code if response is not None else 'no response'}"
             )
             return all_permissions
         permissions = response.json()
@@ -218,9 +218,9 @@ def fetch_auth0_organizations():
             f"https://{AUTH0_TENANT_ID}.{AUTH0_REGION}.auth0.com/api/v2/organizations?per_page={per_page}&page={page}",
             headers=headers,
         )
-        if not response or response.status_code != 200:
+        if response is None or response.status_code != 200:
             logging.error(
-                f"Error fetching Auth0 organizations. Status code: {response.status_code if response else 'no response'}"
+                f"Error fetching Auth0 organizations. Status code: {response.status_code if response is not None else 'no response'}"
             )
             return all_organizations
         organizations = response.json()
@@ -251,9 +251,9 @@ def fetch_auth0_organization_members(organization):
             f"https://{AUTH0_TENANT_ID}.{AUTH0_REGION}.auth0.com/api/v2/organizations/{organization}/members?per_page={per_page}&page={page}",
             headers=headers,
         )
-        if not response or response.status_code != 200:
+        if response is None or response.status_code != 200:
             logging.error(
-                f"Error fetching Auth0 organization members. Status code: {response.status_code if response else 'no response'}"
+                f"Error fetching Auth0 organization members. Status code: {response.status_code if response is not None else 'no response'}"
             )
             return all_members
         members = response.json()
@@ -989,8 +989,8 @@ def fetch_auth0_org_connections(org_id):
         f"{AUTH0_DOMAIN}/api/v2/organizations/{org_id}/enabled_connections",
         headers=headers,
     )
-    if not response or response.status_code != 200:
-        logging.error(f"Failed to fetch connections for org {org_id}: {response.status_code if response else 'no response'}")
+    if response is None or response.status_code != 200:
+        logging.error(f"Failed to fetch connections for org {org_id}: {response.status_code if response is not None else 'no response'}")
         return []
     data = response.json()
     # Auth0 returns {"enabled_connections": [...]} or a plain list depending on API version
@@ -1041,8 +1041,8 @@ def fetch_auth0_connection(connection_id):
         f"{AUTH0_DOMAIN}/api/v2/connections/{connection_id}",
         headers=headers,
     )
-    if not response or response.status_code != 200:
-        logging.error(f"Failed to fetch connection {connection_id}: {response.status_code if response else 'no response'}")
+    if response is None or response.status_code != 200:
+        logging.error(f"Failed to fetch connection {connection_id}: {response.status_code if response is not None else 'no response'}")
         return None
     return response.json()
 

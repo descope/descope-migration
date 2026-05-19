@@ -111,6 +111,8 @@ def fetch_frontegg_tenants():
     offset = 0
 
     while offset <= 10000:
+        if offset == 10000:
+            logging.warning("fetch_frontegg_tenants: reached pagination cap of 10000 records; some tenants may be omitted")
         headers = _get_auth_headers()
         if not headers:
             logging.error("Cannot fetch tenants: no valid access token")
@@ -155,6 +157,8 @@ def fetch_frontegg_permissions():
     offset = 0
 
     while offset <= 10000:
+        if offset == 10000:
+            logging.warning("fetch_frontegg_permissions: reached pagination cap of 10000 records; some permissions may be omitted")
         headers = _get_auth_headers()
         if not headers:
             logging.error("Cannot fetch permissions: no valid access token")
@@ -198,6 +202,8 @@ def fetch_frontegg_roles():
     offset = 0
 
     while offset <= 10000:
+        if offset == 10000:
+            logging.warning("fetch_frontegg_roles: reached pagination cap of 10000 records; some roles may be omitted")
         headers = _get_auth_headers()
         if not headers:
             logging.error("Cannot fetch roles: no valid access token")
@@ -265,10 +271,6 @@ def fetch_frontegg_users():
             break
 
         all_users.extend(items)
-
-        if page >= total_pages - 1:
-            break
-
         page += 1
 
     logging.info(f"Fetched {len(all_users)} users from Frontegg")
@@ -696,6 +698,19 @@ def fetch_tenant_sso_settings(tenant_id):
     return data if isinstance(data, list) else []
 
 
+def _decode_cert(cert: str) -> str:
+    """Return cert as a PEM string. Handles both raw PEM and base64-encoded DER."""
+    if not cert:
+        return ""
+    stripped = cert.strip()
+    if stripped.startswith("-----BEGIN"):
+        return stripped
+    try:
+        return base64.b64decode(stripped).decode("utf-8")
+    except Exception:
+        return stripped
+
+
 def _derive_entity_id(sso_url: str, fallback: str | None = None) -> str:
     """Derive the IdP entity ID from the SSO URL for known providers.
 
@@ -779,7 +794,7 @@ def write_sso(tenants, dry_run, verbose):
                     saml_settings = SSOSAMLSettings(
                         idp_url=sso.get("ssoEndpoint", ""),
                         idp_entity_id=_derive_entity_id(sso.get("ssoEndpoint", ""), sso.get("entityId")),
-                        idp_cert=base64.b64decode(sso.get("publicCertificate", "")).decode("utf-8") if sso.get("publicCertificate") else "",
+                        idp_cert=_decode_cert(sso.get("publicCertificate", "")),
                         attribute_mapping=AttributeMapping(
                             email="email",
                             given_name="firstName",
@@ -834,7 +849,7 @@ def write_sso(tenants, dry_run, verbose):
                 logging.error(f"Failed to migrate {sso_type.upper()} SSO for tenant {tenant_name}: {e}")
                 failed += 1
 
-    print(f"SSO: {migrated} migrated, {failed} failed, {skipped} skipped (disabled)")
+    print(f"SSO: {migrated} migrated, {failed} failed, {skipped} skipped")
 
 
 # --- Top-level Orchestrator ---
@@ -848,6 +863,7 @@ def migrate_frontegg(dry_run, verbose, with_sso=False):
     2. Permissions (populates _permission_id_to_name)
     3. Roles (needs permissions map; populates _role_id_to_name)
     4. Users (needs both maps for role/tenant resolution)
+    5. SSO settings (optional, needs tenants)
 
     Args:
         dry_run (bool): If True, only print what would be done without making API calls
