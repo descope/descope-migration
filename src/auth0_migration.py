@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 from dotenv import load_dotenv
@@ -12,6 +13,13 @@ from descope import (
     UserPassword,
     UserPasswordBcrypt,
     UserObj
+)
+from descope.management.sso_settings import (
+    SSOSAMLSettings,
+    SSOOIDCSettings,
+    AttributeMapping as SSOAttributeMapping,
+    OIDCAttributeMapping,
+    RoleMapping as SSORoleMapping,
 )
 
 from setup import initialize_descope
@@ -58,8 +66,8 @@ def fetch_auth0_users_from_file(file_path):
                 f"https://{AUTH0_TENANT_ID}.{AUTH0_REGION}.auth0.com/api/v2/users?page={page}&per_page={per_page}&q=user_id:\"{user['user_id']}\"",
                 headers=headers,
             )
-            if response.status_code != 200:
-                logging.error(f"Error fetching Auth0 users. Status code: {response.status_code}")
+            if response is None or response.status_code != 200:
+                logging.error(f"Error fetching Auth0 users. Status code: {response.status_code if response is not None else 'no response'}")
                 break  # Consider breaking instead of returning to continue with the next user
             users_from_api = response.json()
             if not users_from_api:
@@ -85,9 +93,9 @@ def fetch_auth0_users():
             f"https://{AUTH0_TENANT_ID}.{AUTH0_REGION}.auth0.com/api/v2/users?page={page}&per_page={per_page}",
             headers=headers,
         )
-        if response.status_code != 200:
+        if response is None or response.status_code != 200:
             logging.error(
-                f"Error fetching Auth0 users. Status code: {response.status_code}"
+                f"Error fetching Auth0 users. Status code: {response.status_code if response is not None else 'no response'}"
             )
             return all_users
         users = response.json()
@@ -115,9 +123,9 @@ def fetch_auth0_roles():
             f"https://{AUTH0_TENANT_ID}.{AUTH0_REGION}.auth0.com/api/v2/roles?page={page}&per_page={per_page}",
             headers=headers,
         )
-        if response.status_code != 200:
+        if response is None or response.status_code != 200:
             logging.error(
-                f"Error fetching Auth0 roles. Status code: {response.status_code}"
+                f"Error fetching Auth0 roles. Status code: {response.status_code if response is not None else 'no response'}"
             )
             return all_roles
         roles = response.json()
@@ -146,9 +154,9 @@ def get_users_in_role(role):
             f"https://{AUTH0_TENANT_ID}.{AUTH0_REGION}.auth0.com/api/v2/roles/{role}/users?page={page}&per_page={per_page}",
             headers=headers,
         )
-        if response.status_code != 200:
+        if response is None or response.status_code != 200:
             logging.error(
-                f"Error fetching Auth0 users in roles. Status code: {response.status_code}"
+                f"Error fetching Auth0 users in roles. Status code: {response.status_code if response is not None else 'no response'}"
             )
             return all_users
         users = response.json()
@@ -179,9 +187,9 @@ def get_permissions_for_role(role):
             f"https://{AUTH0_TENANT_ID}.{AUTH0_REGION}.auth0.com/api/v2/roles/{role}/permissions?per_page={per_page}&page={page}",
             headers=headers,
         )
-        if response.status_code != 200:
+        if response is None or response.status_code != 200:
             logging.error(
-                f"Error fetching Auth0 permissions in roles. Status code: {response.status_code}"
+                f"Error fetching Auth0 permissions in roles. Status code: {response.status_code if response is not None else 'no response'}"
             )
             return all_permissions
         permissions = response.json()
@@ -210,9 +218,9 @@ def fetch_auth0_organizations():
             f"https://{AUTH0_TENANT_ID}.{AUTH0_REGION}.auth0.com/api/v2/organizations?per_page={per_page}&page={page}",
             headers=headers,
         )
-        if response.status_code != 200:
+        if response is None or response.status_code != 200:
             logging.error(
-                f"Error fetching Auth0 organizations. Status code: {response.status_code}"
+                f"Error fetching Auth0 organizations. Status code: {response.status_code if response is not None else 'no response'}"
             )
             return all_organizations
         organizations = response.json()
@@ -243,9 +251,9 @@ def fetch_auth0_organization_members(organization):
             f"https://{AUTH0_TENANT_ID}.{AUTH0_REGION}.auth0.com/api/v2/organizations/{organization}/members?per_page={per_page}&page={page}",
             headers=headers,
         )
-        if response.status_code != 200:
+        if response is None or response.status_code != 200:
             logging.error(
-                f"Error fetching Auth0 organization members. Status code: {response.status_code}"
+                f"Error fetching Auth0 organization members. Status code: {response.status_code if response is not None else 'no response'}"
             )
             return all_members
         members = response.json()
@@ -338,13 +346,13 @@ def create_descope_user(user):
             elif "sms" in identity["connection"]:
                 login_ids.append(user.get("phone_number"))
                 connections.append(identity["connection"])
-            elif "-" in identity["connection"]:
-                login_ids.append(
-                    identity["connection"].split("-")[0] + "-" + identity["user_id"]
-                )
-                connections.append(identity["connection"])
             else:
-                login_ids.append(identity["connection"] + "-" + identity["user_id"])
+                # Use the NameID/provider ID as the primary login_id.
+                # Auth0 identity user_id can be "provider|id" — strip the provider prefix
+                # so we get just the raw ID (e.g. "00unwb7bshbvviaie5d7" from Okta).
+                # The email will be added as an additional_login_id below.
+                uid = identity.get("user_id", "")
+                login_ids.append(uid.rsplit("|", 1)[-1])
                 connections.append(identity["connection"])
 
         emails = [user.get("email")]
@@ -372,7 +380,11 @@ def create_descope_user(user):
                 "connection": ",".join(map(str, connections)),
                 "freshlyMigrated": True,
             }
-            additional_login_ids = login_ids[1 : len(login_ids)]
+            additional_login_ids = login_ids[1:]
+            # If the primary login_id is not an email (synthetic SSO ID), ensure the
+            # email is also registered as a login_id so tenant association works by email.
+            if email and "@" not in login_id and email not in additional_login_ids:
+                additional_login_ids.append(email)
                 
             # Create the user
             resp = descope_client.mgmt.user.create(
@@ -448,9 +460,19 @@ def create_descope_user(user):
 
             try:
                 login_ids.pop(login_ids.index(user_to_update["loginIds"][0]))
-            except Exception as e:
+            except Exception:
                 pass
             login_id = user_to_update["loginIds"][0]
+
+            # If the existing primary login_id is not an email (e.g. synthetic SSO ID like
+            # "okta-okta|00unwb7b..."), ensure the email is included as an additional login_id
+            # so the user can be looked up by email in subsequent steps (e.g. tenant association).
+            email_value = user_to_update["email"] or user.get("email")
+            existing_login_ids = set(user_to_update.get("loginIds", []))
+            if email_value and "@" not in login_id and email_value not in existing_login_ids:
+                if email_value not in login_ids:
+                    login_ids.append(email_value)
+
             resp = descope_client.mgmt.user.update(
                 login_id=login_id,
                 email=user_to_update["email"],
@@ -542,6 +564,62 @@ def add_descope_user_to_tenant(tenant, loginId):
         logging.error("Unable to add user to tenant.")
         logging.error(f"Error:, {error.error_message}")
         return False, error.error_message
+
+_NON_SSO_STRATEGIES = frozenset({"auth0", "email", "sms", ""})
+
+
+def _get_connection_strategy(conn_entry):
+    """
+    Return the connection strategy from either supported Auth0 response shape.
+
+    Some Auth0 endpoints return the strategy nested under "connection", while
+    others return it at the top level of the connection entry.
+    """
+    return (
+        conn_entry.get("connection", {}).get("strategy")
+        or conn_entry.get("strategy", "")
+    )
+
+
+def _org_has_sso(org_connections):
+    """Return True if the org has at least one enterprise/SSO connection."""
+    for conn_entry in org_connections:
+        strategy = _get_connection_strategy(conn_entry)
+        if strategy not in _NON_SSO_STRATEGIES:
+            return True
+    return False
+
+
+def _add_sso_login_id(primary_login_id, sso_login_id):
+    """Add sso_login_id as an additional login ID without clobbering existing ones."""
+    try:
+        resp = descope_client.mgmt.user.load(primary_login_id)
+        u = resp.get("user", {})
+        existing_ids = set(u.get("loginIds", []))
+        if sso_login_id in existing_ids:
+            return True, ""
+        additional = [lid for lid in u.get("loginIds", []) if lid != primary_login_id]
+        additional.append(sso_login_id)
+        descope_client.mgmt.user.update(
+            login_id=primary_login_id,
+            email=u.get("email"),
+            phone=u.get("phone"),
+            display_name=u.get("name"),
+            given_name=u.get("givenName"),
+            middle_name=u.get("middleName"),
+            family_name=u.get("familyName"),
+            picture=u.get("picture"),
+            custom_attributes=u.get("customAttributes", {}),
+            verified_email=u.get("verifiedEmail", False),
+            verified_phone=u.get("verifiedPhone", False),
+            additional_login_ids=additional,
+        )
+        return True, ""
+    except AuthException as error:
+        logging.error(f"Unable to add SSO login ID {sso_login_id} to user {primary_login_id}.")
+        logging.error(f"Error: {error.error_message}")
+        return False, error.error_message
+
 
 def check_tenant_exists_descope(tenant_id):
 
@@ -708,6 +786,21 @@ def process_roles(auth0_roles, dry_run, verbose):
     )
 
 
+def _resolve_auth0_login_id(user):
+    """Resolve a usable login ID from an Auth0 user dict.
+
+    Auth0 org member user_ids can be prefixed (e.g. 'samlp|sso-conn|user@example.com').
+    If the last '|'-separated segment looks like an email, use it.
+    Falls back to the email field, then the full user_id.
+    """
+    user_id = user.get("user_id", "")
+    if user_id:
+        last_segment = user_id.rsplit("|", 1)[-1]
+        if "@" in last_segment:
+            return last_segment
+    return user.get("email") or user_id or None
+
+
 def process_auth0_organizations(auth0_organizations, dry_run, verbose):
     """
     Process the Auth0 organizations - creating tenants and associating users
@@ -744,20 +837,36 @@ def process_auth0_organizations(auth0_organizations, dry_run, verbose):
                 tenant_exists_descope += 1
                     
 
-            org_members = fetch_auth0_organization_members(organization["id"])
+            org_id = organization["id"]
+            org_connections = fetch_auth0_org_connections(org_id)
+            sso_enabled = _org_has_sso(org_connections)
+
+            org_members = fetch_auth0_organization_members(org_id)
             if verbose:
-                print(f"\tOrganization: {organization['display_name']} with {len(org_members)} associated users")
+                print(f"\tOrganization: {organization['display_name']} with {len(org_members)} associated users (SSO: {sso_enabled})")
             users_added = 0
             for user in org_members:
-                success, error = add_descope_user_to_tenant(
-                    organization["id"], user["email"]
-                )
+                login_id = _resolve_auth0_login_id(user)
+                if not login_id:
+                    logging.warning(f"Skipping org member with no email or user_id in org {organization['display_name']}")
+                    continue
+                success, error = add_descope_user_to_tenant(org_id, login_id)
                 if success:
                     users_added += 1
                 else:
                     failed_users_added_tenants.append(
-                        f"User {user['email']} failed to be added to tenant {organization['display_name']} Reason: {error}"
+                        f"User {login_id} failed to be added to tenant {organization['display_name']} Reason: {error}"
                     )
+
+                if sso_enabled:
+                    raw_id = user.get("user_id", "").rsplit("|", 1)[-1]
+                    if raw_id and "@" not in raw_id:
+                        sso_login_id = f"{raw_id}-{org_id}"
+                        ok, err = _add_sso_login_id(login_id, sso_login_id)
+                        if not ok:
+                            failed_users_added_tenants.append(
+                                f"User {login_id} failed to get SSO login ID {sso_login_id} Reason: {err}"
+                            )
             tenant_users.append(
                 f"Associated {users_added} users with tenant: {organization['display_name']} "
             )
@@ -862,8 +971,199 @@ def create_users_with_passwords(user_object):
     
 ### End Password Functions
 
+### SSO Migration
+
+def fetch_auth0_org_connections(org_id):
+    """
+    Fetch all enabled connections for an Auth0 organization.
+
+    Args:
+        org_id (str): Auth0 organization ID (e.g. 'org_xxx')
+
+    Returns:
+        list: Connection dicts with connection_id, strategy, etc.
+    """
+    headers = {"Authorization": f"Bearer {AUTH0_TOKEN}"}
+    response = api_request_with_retry(
+        "get",
+        f"{AUTH0_DOMAIN}/api/v2/organizations/{org_id}/enabled_connections",
+        headers=headers,
+    )
+    if response is None or response.status_code != 200:
+        logging.error(f"Failed to fetch connections for org {org_id}: {response.status_code if response is not None else 'no response'}")
+        return []
+    data = response.json()
+    # Auth0 returns {"enabled_connections": [...]} or a plain list depending on API version
+    if isinstance(data, dict):
+        return data.get("enabled_connections", [])
+    return data
+
+
+def _derive_idp_entity_id(url: str) -> str:
+    """Derive the correct IdP entity ID from a metadata or SSO URL for known providers.
+
+    Okta metadata URL:  https://<domain>.okta.com/app/<app_key>/sso/saml/metadata
+    Okta SSO URL:       https://<domain>.okta.com/app/<app_name>/<app_key>/sso/saml
+    Both map to:        http://www.okta.com/<app_key>
+    """
+    from urllib.parse import urlparse
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    parts = [p for p in parsed.path.split("/") if p]
+    is_okta_host = host == "okta.com" or host.endswith(".okta.com")
+
+    if is_okta_host and parts and parts[0] == "app":
+        # metadata URL: /app/<app_key>/sso/saml/metadata  -> parts[1]
+        # SSO URL:      /app/<app_name>/<app_key>/sso/saml -> parts[2]
+        if len(parts) >= 4 and parts[2] == "sso":
+            return f"http://www.okta.com/{parts[1]}"
+        if len(parts) >= 5 and parts[3] == "sso":
+            return f"http://www.okta.com/{parts[2]}"
+
+    return url  # fall back to the URL itself (e.g. issuer field)
+
+
+def fetch_auth0_connection(connection_id):
+    """
+    Fetch a single Auth0 connection by ID to get its full SSO options.
+
+    Args:
+        connection_id (str): Auth0 connection ID (e.g. 'con_yyy')
+
+    Returns:
+        dict: Connection details including options for SAML/OIDC config, or None on error.
+    """
+    headers = {"Authorization": f"Bearer {AUTH0_TOKEN}"}
+    response = api_request_with_retry(
+        "get",
+        f"{AUTH0_DOMAIN}/api/v2/connections/{connection_id}",
+        headers=headers,
+    )
+    if response is None or response.status_code != 200:
+        logging.error(f"Failed to fetch connection {connection_id}: {response.status_code if response is not None else 'no response'}")
+        return None
+    return response.json()
+
+
+def write_sso(organizations, dry_run, verbose):
+    """
+    Migrate SSO settings (SAML and OIDC) for each Auth0 organization to Descope.
+
+    Fetches enabled connections per org, then fetches the full connection details
+    to build the equivalent Descope SSO configuration.
+
+    Args:
+        organizations (list): List of Auth0 organization dicts
+        dry_run (bool): If True, only print what would be done
+        verbose (bool): If True, log details for each tenant
+    """
+    migrated = 0
+    failed = 0
+    skipped = 0
+
+    for org in organizations:
+        org_id = org.get("id")
+        org_name = org.get("display_name") or org.get("name", org_id)
+
+        connections = fetch_auth0_org_connections(org_id)
+        if not connections:
+            continue
+
+        for conn_ref in connections:
+            connection_id = conn_ref.get("connection_id")
+            # Strategy can live at conn_ref["connection"]["strategy"] or conn_ref["strategy"]
+            strategy = (
+                conn_ref.get("connection", {}).get("strategy")
+                or conn_ref.get("strategy", "")
+            )
+            conn = fetch_auth0_connection(connection_id)
+            if not conn:
+                failed += 1
+                continue
+            if not strategy:
+                strategy = conn.get("strategy", "")
+
+            if strategy not in ("samlp", "oidc"):
+                skipped += 1
+                continue
+
+            options = conn.get("options", {})
+            # Use connection-level domain_aliases as primary source; fall back to org metadata
+            domains = [d for d in options.get("domain_aliases", []) if d]
+            if not domains:
+                org_domain = org.get("metadata", {}).get("domain")
+                if org_domain:
+                    domains = [org_domain]
+
+            try:
+                if strategy == "samlp":
+                    if dry_run:
+                        print(f"[DRY RUN] Would create SAML SSO for org: {org_name}")
+                        migrated += 1
+                        continue
+
+                    settings = SSOSAMLSettings(
+                        idp_url=options.get("signInEndpoint") or options.get("idpSignonUrl", ""),
+                        idp_entity_id=_derive_idp_entity_id(options.get("metadataUrl") or options.get("issuer", "")),
+                        idp_cert=base64.b64decode(options.get("signingCert", "")).decode("utf-8") if options.get("signingCert") else "",
+                        attribute_mapping=SSOAttributeMapping(
+                            email=options.get("user_id_attribute") or "email",
+                            given_name="firstName",
+                            family_name="lastName",
+                            group="groups",
+                        ),
+                        role_mappings=[],
+                        default_sso_roles=[],
+                        sp_acs_url=os.getenv("AUTH0_SAML_SP_ACS_URL", ""),
+                        sp_entity_id=os.getenv("AUTH0_SAML_SP_ENTITY_ID", ""),
+                    )
+
+                    descope_client.mgmt.sso.configure_saml_settings(
+                        tenant_id=org_id,
+                        settings=settings,
+                        domains=domains,
+                    )
+                    migrated += 1
+                    if verbose:
+                        logging.info(f"Created SAML SSO for org: {org_name}")
+
+                elif strategy == "oidc":
+                    if dry_run:
+                        print(f"[DRY RUN] Would create OIDC SSO for org: {org_name}")
+                        migrated += 1
+                        continue
+
+                    settings = SSOOIDCSettings(
+                        name=org_name,
+                        client_id=options.get("client_id", ""),
+                        client_secret=options.get("client_secret"),
+                        attribute_mapping=OIDCAttributeMapping(
+                            login_id="email",
+                            email="email",
+                            given_name="firstName",
+                            family_name="lastName",
+                        ),
+                    )
+                    descope_client.mgmt.sso.configure_oidc_settings(
+                        tenant_id=org_id,
+                        settings=settings,
+                        domains=domains,
+                    )
+                    migrated += 1
+                    if verbose:
+                        logging.info(f"Created OIDC SSO for org: {org_name}")
+
+            except Exception as e:
+                logging.error(f"Failed to migrate {strategy.upper()} SSO for org {org_name}: {e}")
+                failed += 1
+
+    print(f"SSO: {migrated} migrated, {failed} failed, {skipped} skipped")
+
+
 ### Begin Main Migration Function
-def migrate_auth0(dry_run,verbose,passwords_file_path,json_file_path):
+def migrate_auth0(dry_run, verbose, passwords_file_path, json_file_path, with_sso=False):
     """
     Main function to process Auth0 users, roles, permissions, and organizations, creating and mapping them together within your Descope project.
     """
@@ -888,6 +1188,10 @@ def migrate_auth0(dry_run,verbose,passwords_file_path,json_file_path):
     # Fetch, create, and associate users with Organizations
     auth0_organizations = fetch_auth0_organizations()
     successful_tenant_creation, tenant_exists_descope, failed_tenant_creation, failed_users_added_tenants, tenant_users = process_auth0_organizations(auth0_organizations, dry_run, verbose)
+
+    if with_sso:
+        print("Migrating SSO settings per organization...")
+        write_sso(auth0_organizations, dry_run, verbose)
     if dry_run == False:
         if passwords_file_path:
             print("=================== Password User Migration ====================")
