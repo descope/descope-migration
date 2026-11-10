@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 import logging
 import time
 import json
+import base64
 from collections.abc import MutableMapping
 
 load_dotenv()
@@ -189,3 +190,40 @@ class AnonLoginId:
     login_id = f"anon_user_{self.anon_counter}@anonymous.com"
     self.anon_counter += 1
     return login_id
+
+def decode_cert(cert):
+    """Return an IdP signing cert as PEM. Accepts raw PEM or base64-encoded PEM."""
+    if not cert:
+        return ""
+    stripped = cert.strip()
+    if stripped.startswith("-----BEGIN"):
+        return stripped
+    try:
+        decoded = base64.b64decode(stripped, validate=True).decode("utf-8")
+        if decoded.lstrip().startswith("-----BEGIN"):
+            return decoded.strip()
+    except Exception:
+        pass
+    # Bare base64 DER body: wrap it in PEM armor.
+    body = "".join(stripped.split())
+    lines = "\n".join(body[i : i + 64] for i in range(0, len(body), 64))
+    return f"-----BEGIN CERTIFICATE-----\n{lines}\n-----END CERTIFICATE-----"
+
+
+def default_oidc_attribute_mapping():
+    """Standard OIDC claim names. The SDK's OIDCAttributeMapping has no defaults, so every field is required."""
+    from descope.management.sso_settings import OIDCAttributeMapping
+
+    return OIDCAttributeMapping(
+        login_id="sub",
+        name="name",
+        given_name="given_name",
+        middle_name="middle_name",
+        family_name="family_name",
+        email="email",
+        verified_email="email_verified",
+        username="preferred_username",
+        phone_number="phone_number",
+        verified_phone="phone_number_verified",
+        picture="picture",
+    )

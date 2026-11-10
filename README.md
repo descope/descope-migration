@@ -66,7 +66,7 @@ Pick the third-party you are migrating from and follow the corrosponding guide
 - [AWS Cognito](https://docs.descope.com/migrate/cognito)
 - [Firebase](https://docs.descope.com/migrate/firebase)
 - [Ping](https://docs.descope.com/migrate/ping)
-- Frontegg (see .env.example for required credentials)
+- Frontegg (see .env.example for required credentials). Set `FRONTEGG_REGION` to `eu` (default), `us`, `ca` or `au` to match your Frontegg API gateway, or `FRONTEGG_API_URL` to override it. Frontegg does not export password hashes, so users are migrated without passwords. Role keys (what Frontegg puts in tokens) become Descope role names.
 
 ### Dry Run vs Live Run
 
@@ -123,7 +123,9 @@ Before running, set the following variables in your `.env` file:
 | `FRONTEGG_SAML_SP_ACS_URL` | Your Descope SP ACS (Assertion Consumer Service) URL |
 | `FRONTEGG_SAML_SP_ENTITY_ID` | Your Descope SP Entity ID |
 
-The tool auto-detects the IdP entity ID for known providers (Okta, Azure AD, JumpCloud) based on the SSO endpoint URL. For unrecognized providers it falls back to the value stored in Frontegg.
+Frontegg does not store the IdP entity ID, so the tool derives it from the SSO endpoint URL for known providers (Okta, Azure AD, JumpCloud). For other providers it is left empty and must be filled in on the tenant's SSO settings in the Descope console.
+
+For OIDC, Frontegg stores only the authorization endpoint. The tool looks up the IdP's `/.well-known/openid-configuration` to fill in the issuer, token, userinfo and JWKS URLs. When no discovery document is found, it logs a warning and those fields must be completed in the console.
 
 Use:
 ```

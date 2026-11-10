@@ -1,4 +1,3 @@
-import base64
 import json
 import os
 from dotenv import load_dotenv
@@ -18,15 +17,15 @@ from descope.management.sso_settings import (
     SSOSAMLSettings,
     SSOOIDCSettings,
     AttributeMapping as SSOAttributeMapping,
-    OIDCAttributeMapping,
-    RoleMapping as SSORoleMapping,
 )
 
 from setup import initialize_descope
 
 from utils import (
     api_request_with_retry,
-    create_custom_attributes_in_descope
+    create_custom_attributes_in_descope,
+    decode_cert,
+    default_oidc_attribute_mapping,
 )
 
 """Load and read environment variables from .env file"""
@@ -329,6 +328,12 @@ def create_descope_role_and_permissions(role, permissions):
         return False, True, success_permissions, existing_permissions_descope, failed_permissions, ""
 
 
+# Auth0 identity providers that are enterprise SSO connections.
+_ENTERPRISE_PROVIDERS = frozenset(
+    {"samlp", "oidc", "okta", "waad", "adfs", "pingfederate", "google-apps", "ad"}
+)
+
+
 def create_descope_user(user):
     """
     Create a Descope user based on matched Auth0 user data using Descope Python SDK.
@@ -346,13 +351,23 @@ def create_descope_user(user):
             elif "sms" in identity["connection"]:
                 login_ids.append(user.get("phone_number"))
                 connections.append(identity["connection"])
-            else:
-                # Use the NameID/provider ID as the primary login_id.
+            elif identity.get("provider") in _ENTERPRISE_PROVIDERS:
+                # Enterprise SSO: use the raw IdP subject (NameID) as the login_id.
                 # Auth0 identity user_id can be "provider|id" — strip the provider prefix
                 # so we get just the raw ID (e.g. "00unwb7bshbvviaie5d7" from Okta).
                 # The email will be added as an additional_login_id below.
                 uid = identity.get("user_id", "")
                 login_ids.append(uid.rsplit("|", 1)[-1])
+                connections.append(identity["connection"])
+            elif "-" in identity["connection"]:
+                # Social connections keep the connection prefix so raw IDs from
+                # different providers can't collide.
+                login_ids.append(
+                    identity["connection"].split("-")[0] + "-" + identity["user_id"]
+                )
+                connections.append(identity["connection"])
+            else:
+                login_ids.append(identity["connection"] + "-" + identity["user_id"])
                 connections.append(identity["connection"])
 
         emails = [user.get("email")]
@@ -999,6 +1014,13 @@ def fetch_auth0_org_connections(org_id):
     return data
 
 
+def _first_attr(value):
+    """Auth0 fieldsMap values can be a single attribute name or a list of them."""
+    if isinstance(value, list):
+        return value[0] if value else None
+    return value
+
+
 def _derive_idp_entity_id(url: str) -> str:
     """Derive the correct IdP entity ID from a metadata or SSO URL for known providers.
 
@@ -1104,14 +1126,15 @@ def write_sso(organizations, dry_run, verbose):
                         migrated += 1
                         continue
 
+                    fields_map = options.get("fieldsMap") or {}
                     settings = SSOSAMLSettings(
                         idp_url=options.get("signInEndpoint") or options.get("idpSignonUrl", ""),
                         idp_entity_id=_derive_idp_entity_id(options.get("metadataUrl") or options.get("issuer", "")),
-                        idp_cert=base64.b64decode(options.get("signingCert", "")).decode("utf-8") if options.get("signingCert") else "",
+                        idp_cert=decode_cert(options.get("signingCert", "")),
                         attribute_mapping=SSOAttributeMapping(
-                            email=options.get("user_id_attribute") or "email",
-                            given_name="firstName",
-                            family_name="lastName",
+                            email=_first_attr(fields_map.get("email")) or "email",
+                            given_name=_first_attr(fields_map.get("given_name")) or "firstName",
+                            family_name=_first_attr(fields_map.get("family_name")) or "lastName",
                             group="groups",
                         ),
                         role_mappings=[],
@@ -1135,16 +1158,18 @@ def write_sso(organizations, dry_run, verbose):
                         migrated += 1
                         continue
 
+                    scope = options.get("scope") or "openid profile email"
                     settings = SSOOIDCSettings(
                         name=org_name,
                         client_id=options.get("client_id", ""),
                         client_secret=options.get("client_secret"),
-                        attribute_mapping=OIDCAttributeMapping(
-                            login_id="email",
-                            email="email",
-                            given_name="firstName",
-                            family_name="lastName",
-                        ),
+                        issuer=options.get("issuer"),
+                        auth_url=options.get("authorization_endpoint"),
+                        token_url=options.get("token_endpoint"),
+                        user_data_url=options.get("userinfo_endpoint"),
+                        jwks_url=options.get("jwks_uri"),
+                        scope=scope.split() if isinstance(scope, str) else scope,
+                        attribute_mapping=default_oidc_attribute_mapping(),
                     )
                     descope_client.mgmt.sso.configure_oidc_settings(
                         tenant_id=org_id,

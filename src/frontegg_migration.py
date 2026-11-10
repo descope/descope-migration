@@ -1,21 +1,25 @@
 import os
-import base64
 import logging
 import requests
 import json
 import re
 import time
 from dotenv import load_dotenv
-from descope import UserObj
+from urllib.parse import urlparse
+from descope import AssociatedTenant, UserObj
 from descope.management.sso_settings import (
     SSOSAMLSettings,
     SSOOIDCSettings,
     RoleMapping,
     AttributeMapping,
-    OIDCAttributeMapping,
 )
 from setup import initialize_descope
-from utils import api_request_with_retry, create_custom_attributes_in_descope
+from utils import (
+    api_request_with_retry,
+    create_custom_attributes_in_descope,
+    decode_cert,
+    default_oidc_attribute_mapping,
+)
 
 """
 Load and read environment variables from .env file
@@ -23,6 +27,20 @@ Load and read environment variables from .env file
 load_dotenv()
 FRONTEGG_CLIENT_ID = os.getenv("FRONTEGG_CLIENT_ID")
 FRONTEGG_SECRET_KEY = os.getenv("FRONTEGG_SECRET_KEY")
+
+# Frontegg API gateway per region: https://developers.frontegg.com/ciam/api/overview
+_FRONTEGG_REGION_URLS = {
+    "eu": "https://api.frontegg.com",
+    "us": "https://api.us.frontegg.com",
+    "ca": "https://api.ca.frontegg.com",
+    "au": "https://api.au.frontegg.com",
+}
+FRONTEGG_REGION = (os.getenv("FRONTEGG_REGION") or "eu").lower()
+FRONTEGG_API_URL = os.getenv("FRONTEGG_API_URL") or _FRONTEGG_REGION_URLS.get(FRONTEGG_REGION)
+if not FRONTEGG_API_URL:
+    raise ValueError(
+        f"Unknown FRONTEGG_REGION '{FRONTEGG_REGION}'. Use one of {sorted(_FRONTEGG_REGION_URLS)} or set FRONTEGG_API_URL."
+    )
 
 descope_client = initialize_descope()
 
@@ -40,49 +58,39 @@ _role_id_to_name = {}
 # --- Frontegg API Authentication ---
 def get_frontegg_access_token():
     """
-    Retrieve and manage access token for Frontegg API authentication.
+    Return a cached vendor token, fetching a new one when it is missing or about to expire.
 
-    This function implements token caching to avoid unnecessary API calls.
-    If a valid token exists, it returns the cached token. Otherwise, it
-    fetches a new token using the vendor credentials flow.
+    POST /auth/vendor {clientId, secret} -> {token, expiresIn (seconds)}
 
     Returns:
         str or None: The access token if successful, None if failed
-
-    Global Variables:
-        _access_token (str): Cached access token
-        _token_expiry (float): Timestamp when token expires
     """
     global _access_token, _token_expiry
 
-    # If token is still valid, return it
     if _access_token and time.time() < _token_expiry:
         return _access_token
 
-    # Fetch a new token using vendor credentials
-    token_url = "https://api.frontegg.com/auth/vendor"
-    payload = {
-        "clientId": FRONTEGG_CLIENT_ID,
-        "secret": FRONTEGG_SECRET_KEY,
-    }
-    headers = {
-        "Content-Type": "application/json",
-    }
-    response = requests.post(token_url, json=payload, headers=headers)
+    response = requests.post(
+        f"{FRONTEGG_API_URL}/auth/vendor",
+        json={"clientId": FRONTEGG_CLIENT_ID, "secret": FRONTEGG_SECRET_KEY},
+        headers={"Content-Type": "application/json"},
+        timeout=10,
+    )
     if response.status_code == 200:
         data = response.json()
-        _access_token = data.get("token") or data.get("accessToken")
-        expires_in = data.get("expiresIn", 3600)
-        _token_expiry = time.time() + expires_in - 60  # Refresh 1 min before expiry
+        _access_token = data.get("token")
+        _token_expiry = time.time() + data.get("expiresIn", 3600) - 60  # Refresh 1 min before expiry
         return _access_token
-    else:
-        logging.error(f"Failed to get Frontegg access token: {response.text}")
-        return None
+    logging.error(f"Failed to get Frontegg access token ({response.status_code}): {response.text}")
+    return None
 
 
-def _get_auth_headers():
+def _get_auth_headers(tenant_id=None):
     """
-    Build authorization headers using the current access token.
+    Build authorization headers using the current vendor token.
+
+    Args:
+        tenant_id (str|None): Scopes the call to a tenant via the frontegg-tenant-id header
 
     Returns:
         dict or None: Headers dict if token available, None otherwise
@@ -90,191 +98,116 @@ def _get_auth_headers():
     token = get_frontegg_access_token()
     if not token:
         return None
-    return {
+    headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
+    if tenant_id:
+        headers["frontegg-tenant-id"] = tenant_id
+    return headers
+
+
+def _frontegg_get(path, tenant_id=None):
+    """GET a Frontegg API path. Returns parsed JSON, or None on failure (already logged)."""
+    headers = _get_auth_headers(tenant_id)
+    if not headers:
+        logging.error(f"Cannot call {path}: no valid Frontegg access token")
+        return None
+    response = api_request_with_retry("get", f"{FRONTEGG_API_URL}{path}", headers)
+    if response is None or response.status_code != 200:
+        status = response.status_code if response is not None else "no response"
+        logging.error(f"Frontegg GET {path} failed ({status})")
+        return None
+    return response.json()
+
+
+def _fetch_paginated(path, id_key="id", limit=200):
+    """
+    Fetch every item from a Frontegg paginated endpoint.
+
+    Frontegg's paginated APIs (users v3, tenants v2) use _offset as a 0-based PAGE NUMBER
+    and return {items, _metadata: {totalItems, totalPages}}.
+
+    Items are de-duplicated by id_key so a page re-read can never double-count.
+    """
+    items_by_id = {}
+    page = 0
+    total_pages = 1
+    sep = "&" if "?" in path else "?"
+    while page < total_pages:
+        data = _frontegg_get(f"{path}{sep}_limit={limit}&_offset={page}")
+        if data is None:
+            logging.error(f"Stopped paginating {path} at page {page}; results are incomplete")
+            break
+        items = data.get("items", []) if isinstance(data, dict) else data
+        if not items:
+            break
+        for item in items:
+            items_by_id[item.get(id_key) or item.get("id")] = item
+        total_pages = (data.get("_metadata") or {}).get("totalPages", 1) if isinstance(data, dict) else 1
+        page += 1
+    return list(items_by_id.values())
 
 
 # --- Fetch Functions ---
 
 def fetch_frontegg_tenants():
-    """
-    Fetch all tenants from Frontegg using record-count offset pagination.
-
-    Returns:
-        list: All tenants fetched from Frontegg
-    """
-    base_url = "https://api.frontegg.com/tenants/resources/tenants/v2"
-    all_tenants = []
-    limit = 50
-    offset = 0
-
-    while offset <= 10000:
-        if offset == 10000:
-            logging.warning("fetch_frontegg_tenants: reached pagination cap of 10000 records; some tenants may be omitted")
-        headers = _get_auth_headers()
-        if not headers:
-            logging.error("Cannot fetch tenants: no valid access token")
-            break
-
-        url = f"{base_url}?_offset={offset}&_limit={limit}"
-        response = api_request_with_retry("get", url, headers)
-        if not response:
-            logging.error(f"Failed to fetch tenants at offset {offset}")
-            break
-
-        data = response.json()
-        if isinstance(data, dict):
-            if "items" in data:
-                items = data.get("items", [])
-            else:
-                items = data.get("data", [])
-        else:
-            items = data if isinstance(data, list) else []
-
-        all_tenants.extend(items)
-
-        if len(items) < limit:
-            break
-
-        offset += limit
-
-    logging.info(f"Fetched {len(all_tenants)} tenants from Frontegg")
-    return all_tenants
+    """Fetch all tenants (GET /tenants/resources/tenants/v2, paginated)."""
+    tenants = _fetch_paginated("/tenants/resources/tenants/v2", id_key="tenantId")
+    logging.info(f"Fetched {len(tenants)} tenants from Frontegg")
+    return tenants
 
 
 def fetch_frontegg_permissions():
-    """
-    Fetch all permissions from Frontegg using record-count offset pagination.
-
-    Returns:
-        list: All permissions fetched from Frontegg
-    """
-    base_url = "https://api.frontegg.com/identity/resources/permissions/v1"
-    all_permissions = []
-    limit = 50
-    offset = 0
-
-    while offset <= 10000:
-        if offset == 10000:
-            logging.warning("fetch_frontegg_permissions: reached pagination cap of 10000 records; some permissions may be omitted")
-        headers = _get_auth_headers()
-        if not headers:
-            logging.error("Cannot fetch permissions: no valid access token")
-            break
-
-        url = f"{base_url}?_offset={offset}&_limit={limit}"
-        response = api_request_with_retry("get", url, headers)
-        if not response:
-            logging.error(f"Failed to fetch permissions at offset {offset}")
-            break
-
-        data = response.json()
-        if isinstance(data, dict):
-            items = data.get("items", [])
-            if not items:
-                items = data.get("data", [])
-        else:
-            items = data if isinstance(data, list) else []
-
-        all_permissions.extend(items)
-
-        if len(items) < limit:
-            break
-
-        offset += limit
-
-    logging.info(f"Fetched {len(all_permissions)} permissions from Frontegg")
-    return all_permissions
+    """Fetch all permissions (GET /identity/resources/permissions/v1 returns a plain array, no pagination)."""
+    permissions = _frontegg_get("/identity/resources/permissions/v1") or []
+    logging.info(f"Fetched {len(permissions)} permissions from Frontegg")
+    return permissions
 
 
 def fetch_frontegg_roles():
-    """
-    Fetch all roles from Frontegg using record-count offset pagination.
-
-    Returns:
-        list: All roles fetched from Frontegg
-    """
-    base_url = "https://api.frontegg.com/identity/resources/roles/v1"
-    all_roles = []
-    limit = 50
-    offset = 0
-
-    while offset <= 10000:
-        if offset == 10000:
-            logging.warning("fetch_frontegg_roles: reached pagination cap of 10000 records; some roles may be omitted")
-        headers = _get_auth_headers()
-        if not headers:
-            logging.error("Cannot fetch roles: no valid access token")
-            break
-
-        url = f"{base_url}?_offset={offset}&_limit={limit}"
-        response = api_request_with_retry("get", url, headers)
-        if not response:
-            logging.error(f"Failed to fetch roles at offset {offset}")
-            break
-
-        data = response.json()
-        if isinstance(data, dict):
-            items = data.get("items", [])
-            if not items:
-                items = data.get("data", [])
-        else:
-            items = data if isinstance(data, list) else []
-
-        all_roles.extend(items)
-
-        if len(items) < limit:
-            break
-
-        offset += limit
-
-    logging.info(f"Fetched {len(all_roles)} roles from Frontegg")
-    return all_roles
+    """Fetch all roles across all tenants (GET /identity/resources/roles/v1 returns a plain array, no pagination)."""
+    roles = _frontegg_get("/identity/resources/roles/v1") or []
+    logging.info(f"Fetched {len(roles)} roles from Frontegg")
+    return roles
 
 
 def fetch_frontegg_users():
-    """
-    Fetch all users from Frontegg using page-number offset pagination.
+    """Fetch all users in the environment (GET /identity/resources/users/v3, paginated, no tenant header)."""
+    users = _fetch_paginated("/identity/resources/users/v3")
+    logging.info(f"Fetched {len(users)} users from Frontegg")
+    return users
 
-    Note: _offset is a PAGE NUMBER (0-indexed), not a record count.
-    _limit is the number of users per page (max 200).
+
+def fetch_frontegg_user_roles(users, chunk_size=100):
+    """
+    Fetch each user's role IDs per tenant.
+
+    The users v3 list returns tenants[].roles EMPTY, so roles come from
+    GET /identity/resources/users/v3/roles?ids=..., which requires the frontegg-tenant-id
+    header and returns [{tenantId, userId, roleIds}].
 
     Returns:
-        list: All users fetched from Frontegg
+        dict: {(user_id, tenant_id): [role_id, ...]}
     """
-    base_url = "https://api.frontegg.com/identity/resources/users/v1"
-    all_users = []
-    limit = 200
-    page = 0
-    total_pages = 1
+    users_by_tenant = {}
+    for user in users:
+        for t in user.get("tenants", []):
+            if t.get("tenantId") and user.get("id"):
+                users_by_tenant.setdefault(t["tenantId"], []).append(user["id"])
 
-    while page < total_pages:
-        headers = _get_auth_headers()
-        if not headers:
-            logging.error("Cannot fetch users: no valid access token")
-            break
-
-        url = f"{base_url}?_limit={limit}&_offset={page}&_includeSubTenants=true"
-        response = api_request_with_retry("get", url, headers)
-        if not response:
-            logging.error(f"Failed to fetch users at page {page}")
-            break
-
-        data = response.json()
-        items = data.get("items", [])
-        metadata = data.get("_metadata", {})
-        total_pages = metadata.get("totalPages", 1)
-
-        if len(items) == 0:
-            break
-
-        all_users.extend(items)
-        page += 1
-
-    logging.info(f"Fetched {len(all_users)} users from Frontegg")
-    return all_users
+    role_map = {}
+    for tenant_id, user_ids in users_by_tenant.items():
+        for i in range(0, len(user_ids), chunk_size):
+            query = "&".join(f"ids={uid}" for uid in user_ids[i : i + chunk_size])
+            rows = _frontegg_get(f"/identity/resources/users/v3/roles?{query}", tenant_id=tenant_id)
+            if not isinstance(rows, list):
+                logging.error(f"Could not fetch user roles for tenant {tenant_id}; those users will be migrated without roles")
+                continue
+            for row in rows:
+                role_map[(row.get("userId"), row.get("tenantId") or tenant_id)] = row.get("roleIds") or []
+    logging.info(f"Fetched role assignments for {len(role_map)} user-tenant memberships")
+    return role_map
 
 
 # --- Write Functions ---
@@ -287,9 +220,15 @@ def write_tenants(tenants, dry_run, verbose):
         tenants (list): List of tenant dicts from Frontegg
         dry_run (bool): If True, only print what would be done without making API calls
         verbose (bool): If True, print detailed information about each tenant
+
+    Returns:
+        set: IDs of tenants that exist in Descope afterwards (created or already there).
+            In dry run, every Frontegg tenant ID.
     """
     created_count = 0
+    existing_count = 0
     failed_count = 0
+    present_ids = set()
 
     for tenant in tenants:
         tenant_id = tenant.get("tenantId") or tenant.get("id")
@@ -297,6 +236,7 @@ def write_tenants(tenants, dry_run, verbose):
         domain = tenant.get("domain")
 
         if dry_run:
+            present_ids.add(tenant_id)
             print(f"[DRY RUN] Would create tenant: {name} (id: {tenant_id})")
             if verbose and domain:
                 print(f"  Domain: {domain}")
@@ -305,11 +245,19 @@ def write_tenants(tenants, dry_run, verbose):
         try:
             descope_client.mgmt.tenant.create(name=name, id=tenant_id)
             created_count += 1
+            present_ids.add(tenant_id)
             if verbose:
                 logging.info(f"Created tenant: {name} (id: {tenant_id})")
         except Exception as e:
-            logging.error(f"Failed to create tenant {name}: {e}")
-            failed_count += 1
+            try:
+                descope_client.mgmt.tenant.load(tenant_id)
+                existing_count += 1
+                present_ids.add(tenant_id)
+                if verbose:
+                    logging.info(f"Tenant already exists, skipping: {name} (id: {tenant_id})")
+            except Exception:
+                logging.error(f"Failed to create tenant {name} (id: {tenant_id}): {e}")
+                failed_count += 1
             continue
 
         if domain:
@@ -323,7 +271,8 @@ def write_tenants(tenants, dry_run, verbose):
                 logging.warning(f"Failed to set domain {domain} for tenant {tenant_id}: {e}")
 
     if not dry_run:
-        print(f"Tenants: {created_count} created, {failed_count} failed")
+        print(f"Tenants: {created_count} created, {existing_count} already existed, {failed_count} failed")
+    return present_ids
 
 
 def write_permissions(permissions, dry_run, verbose, referenced_perm_ids=None):
@@ -344,7 +293,6 @@ def write_permissions(permissions, dry_run, verbose, referenced_perm_ids=None):
         referenced_perm_ids (set|None): Permission IDs actually used by roles; built-ins
             in this set will be created even though they are Frontegg built-ins.
     """
-    global _permission_id_to_name
     created_count = 0
     failed_count = 0
     skipped_count = 0
@@ -409,13 +357,14 @@ def write_roles(roles, dry_run, verbose):
         dry_run (bool): If True, only print what would be done without making API calls
         verbose (bool): If True, print detailed information about each role
     """
-    global _role_id_to_name
     created_count = 0
+    existing_count = 0
     failed_count = 0
 
     for role in roles:
-        role_name = role.get("name", "")
-        role_desc = role.get("description", "")
+        # Frontegg JWTs carry role keys (unique); names are display labels and may repeat.
+        role_name = role.get("key") or role.get("name", "")
+        role_desc = role.get("description") or role.get("name", "")
         role_id = role.get("id", "")
         tenant_id = role.get("tenantId", "")  # Empty string = project-level role
 
@@ -450,33 +399,34 @@ def write_roles(roles, dry_run, verbose):
             if verbose:
                 logging.info(f"Created role: {role_name}")
         except Exception as e:
-            logging.error(f"Failed to create role {role_name}: {e}")
-            failed_count += 1
+            if "E024209" in str(e) or "already exist" in str(e).lower():
+                existing_count += 1
+                logging.warning(f"Role already exists in Descope, left unchanged: {role_name}")
+            else:
+                logging.error(f"Failed to create role {role_name}: {e}")
+                failed_count += 1
 
     if not dry_run:
-        print(f"Roles: {created_count} created, {failed_count} failed")
+        print(f"Roles: {created_count} created, {existing_count} already existed (left unchanged), {failed_count} failed")
 
 
-def write_users(users, dry_run, verbose):
+def write_users(users, dry_run, verbose, user_roles=None, tenant_ids=None):
     """
-    Write users to Descope using a two-pass approach.
+    Batch-create users in Descope with their tenant associations and tenant roles.
 
-    Pass 1: Batch create all users (without tenant associations).
-    Pass 2: Add tenant associations and tenant-specific roles for each user.
-
-    Passwords are silently skipped -- no password field is included in the
-    user payload and no per-user warning is printed.
-
-    Custom attributes defined in Frontegg are created in Descope before
-    the batch import.
+    Frontegg users (users v3) carry roles only per tenant; see fetch_frontegg_user_roles.
+    Passwords are not exported by the Frontegg API and are not migrated.
 
     Args:
-        users (list): List of user dicts from Frontegg
+        users (list): List of user dicts from Frontegg (UserV3Dto)
         dry_run (bool): If True, only print what would be done without making API calls
         verbose (bool): If True, print detailed information about each user
+        user_roles (dict|None): {(user_id, tenant_id): [role_id]} from fetch_frontegg_user_roles
+        tenant_ids (set|None): Tenants that exist in Descope; memberships in any other tenant are
+            dropped with a warning so they don't fail the whole user
     """
-    # Custom attributes to create in Descope for Frontegg-specific fields
-    FRONTEGG_CUSTOM_ATTRS = {
+    user_roles = user_roles or {}
+    frontegg_custom_attrs = {
         "fronteggId": "String",
         "verified": "Boolean",
         "metadata": "String",
@@ -484,270 +434,179 @@ def write_users(users, dry_run, verbose):
         "mfaEnrolled": "Boolean",
         "provider": "String",
     }
-
     if not dry_run:
-        create_custom_attributes_in_descope(FRONTEGG_CUSTOM_ATTRS)
+        create_custom_attributes_in_descope(frontegg_custom_attrs)
 
-    # E.164 phone number regex for validation
     e164_regex = re.compile(r"^\+[1-9]\d{1,14}$")
-
-    # Prepare user data structures
-    prepared_users = []  # For batch create
-    user_tenant_associations = []  # For pass 2
+    prepared_users = []
 
     for user in users:
         login_id = user.get("email") or user.get("id")
         if not login_id:
-            logging.warning(f"Skipping user with no email or id: {user}")
+            logging.warning(f"Skipping user with no email or id: {user.get('id')}")
             continue
-
-        email = user.get("email")
 
         # Display name: skip if it looks like an LDAP CN= value
         display_name = user.get("name")
         if display_name and "CN=" in display_name:
             display_name = None
 
-        given_name = user.get("givenName")
-        family_name = user.get("familyName")
+        raw_phone = user.get("phoneNumber")
+        phone = raw_phone if raw_phone and e164_regex.match(raw_phone) else None
 
-        # Phone validation: must match E.164 format
-        raw_phone = user.get("phoneNumber") or user.get("mobilePhoneNumber")
-        if raw_phone and (raw_phone == "-" or not e164_regex.match(raw_phone)):
-            phone = None
-        else:
-            phone = raw_phone
-
-        picture = user.get("profilePictureUrl")
-        verified_email = bool(user.get("verified", False))
-
-        # Custom attributes from Frontegg
-        metadata_raw = user.get("metadata", {})
-        if isinstance(metadata_raw, dict):
-            metadata_str = json.dumps(metadata_raw)
-        else:
-            metadata_str = str(metadata_raw) if metadata_raw else ""
+        # metadata is a JSON-encoded string in the Frontegg API; keep it as-is
+        metadata = user.get("metadata")
+        if isinstance(metadata, dict):
+            metadata = json.dumps(metadata)
 
         custom_attributes = {
             "fronteggId": user.get("id", ""),
-            "verified": user.get("verified", False),
-            "metadata": metadata_str,
-            "isLocked": user.get("isLocked", False),
-            "mfaEnrolled": user.get("mfaEnrolled", False),
-            "provider": user.get("provider", "local"),
+            "verified": bool(user.get("verified", False)),
+            "metadata": metadata or "",
+            "isLocked": bool(user.get("isLocked", False)),
+            "mfaEnrolled": bool(user.get("mfaEnrolled", False)),
+            "provider": user.get("provider") or "local",
         }
-        # Merge any additional custom attributes from Frontegg
-        extra_attrs = user.get("customAttributes", {})
-        if isinstance(extra_attrs, dict):
-            custom_attributes.update(extra_attrs)
 
-        # Project-level roles (roles without a tenantId)
-        project_role_names = []
-        for role in user.get("roles", []):
-            if not role.get("tenantId"):
-                resolved = _role_id_to_name.get(role.get("id"))
-                if resolved:
-                    project_role_names.append(resolved)
-
-        # Tenant associations with tenant-specific roles
         user_tenants = []
         for t in user.get("tenants", []):
-            tenant_id = t.get("tenantId") or t.get("id")
+            tenant_id = t.get("tenantId")
             if not tenant_id:
                 continue
-            tenant_roles = []
-            for role in t.get("roles", []):
-                resolved = _role_id_to_name.get(role.get("id"))
-                if resolved:
-                    tenant_roles.append(resolved)
-            user_tenants.append({"tenant_id": tenant_id, "role_names": tenant_roles})
+            if tenant_ids is not None and tenant_id not in tenant_ids:
+                logging.warning(f"User {login_id}: tenant {tenant_id} was not migrated, dropping that membership")
+                continue
+            role_ids = user_roles.get((user.get("id"), tenant_id))
+            if role_ids is None:
+                role_ids = [r.get("id") for r in t.get("roles", [])]
+            role_names = [_role_id_to_name[r] for r in role_ids if r in _role_id_to_name]
+            user_tenants.append(AssociatedTenant(tenant_id, role_names))
 
-        user_obj = UserObj(
-            login_id=login_id,
-            email=email,
-            display_name=display_name,
-            given_name=given_name,
-            family_name=family_name,
-            phone=phone,
-            verified_email=verified_email,
-            picture=picture,
-            role_names=project_role_names,
-            custom_attributes=custom_attributes,
+        prepared_users.append(
+            UserObj(
+                login_id=login_id,
+                email=user.get("email"),
+                display_name=display_name,
+                phone=phone,
+                verified_email=bool(user.get("verified", False)),
+                picture=user.get("profilePictureUrl"),
+                user_tenants=user_tenants,
+                custom_attributes=custom_attributes,
+            )
         )
 
-        prepared_users.append(user_obj)
-        user_tenant_associations.append((login_id, user_tenants))
-
     if dry_run:
-        total_tenant_assocs = sum(len(assocs) for _, assocs in user_tenant_associations)
-        print(f"[DRY RUN] Would create {len(prepared_users)} users")
-        print(f"[DRY RUN] Would create {total_tenant_assocs} tenant associations")
+        total_tenant_assocs = sum(len(u.user_tenants or []) for u in prepared_users)
+        print(f"[DRY RUN] Would create {len(prepared_users)} users with {total_tenant_assocs} tenant associations")
         if verbose:
-            for ud in prepared_users:
-                print(f"  User: {ud.login_id}, roles: {ud.role_names}")
+            for u in prepared_users:
+                print(f"  User: {u.login_id}, tenants: {[(t.tenant_id, t.role_names) for t in u.user_tenants or []]}")
         return
 
-    # --- Pass 1: Batch create users ---
     batch_size = 500
     total_created = 0
     total_failed = 0
-
     for i in range(0, len(prepared_users), batch_size):
         batch = prepared_users[i : i + batch_size]
         try:
-            descope_client.mgmt.user.invite_batch(
-                users=batch, send_mail=False, send_sms=False
-            )
-            total_created += len(batch)
-            logging.info(f"Batch {i // batch_size + 1}: created {len(batch)} users")
+            resp = descope_client.mgmt.user.invite_batch(users=batch, send_mail=False, send_sms=False)
         except Exception as e:
             logging.error(f"Failed to create user batch starting at index {i}: {e}")
             total_failed += len(batch)
+            continue
+        failed = resp.get("failedUsers") or []
+        for f in failed:
+            logging.error(f"Failed to create user {f.get('user', {}).get('loginIds')}: {f.get('failure')}")
+        total_failed += len(failed)
+        total_created += len(resp.get("createdUsers") or [])
+        logging.info(f"Batch {i // batch_size + 1}: {len(resp.get('createdUsers') or [])} created, {len(failed)} failed")
 
-    print(f"Users (batch create): {total_created} created, {total_failed} failed")
-
-    # --- Pass 2: Tenant associations ---
-    assoc_created = 0
-    assoc_failed = 0
-
-    for login_id, user_tenants in user_tenant_associations:
-        for assoc in user_tenants:
-            tenant_id = assoc["tenant_id"]
-            role_names = assoc["role_names"]
-
-            try:
-                descope_client.mgmt.user.add_tenant(
-                    login_id=login_id, tenant_id=tenant_id
-                )
-                assoc_created += 1
-            except Exception as e:
-                logging.error(
-                    f"Failed to add tenant {tenant_id} to user {login_id}: {e}"
-                )
-                assoc_failed += 1
-                continue
-
-            if role_names:
-                try:
-                    descope_client.mgmt.user.add_tenant_roles(
-                        login_id=login_id,
-                        tenant_id=tenant_id,
-                        role_names=role_names,
-                    )
-                except Exception as e:
-                    logging.error(
-                        f"Failed to add tenant roles for user {login_id} in tenant {tenant_id}: {e}"
-                    )
-
-    print(f"Tenant associations: {assoc_created} created, {assoc_failed} failed")
+    print(f"Users: {total_created} created, {total_failed} failed")
 
 
 # --- SSO Migration ---
 
-def get_frontegg_tenant_token(tenant_id):
-    """
-    Get a tenant-scoped admin token from Frontegg by passing tenantId to the auth endpoint.
-
-    Args:
-        tenant_id (str): The Frontegg tenant ID
-
-    Returns:
-        str or None: Tenant-scoped access token
-    """
-    token_url = "https://api.frontegg.com/auth/vendor"
-    payload = {
-        "clientId": FRONTEGG_CLIENT_ID,
-        "secret": FRONTEGG_SECRET_KEY,
-        "tenantId": tenant_id,
-    }
-    response = requests.post(token_url, json=payload, headers={"Content-Type": "application/json"})
-    if response.status_code == 200:
-        data = response.json()
-        return data.get("token") or data.get("accessToken")
-    else:
-        logging.error(f"Failed to get tenant token for {tenant_id}: {response.text}")
-        return None
-
-
 def fetch_tenant_sso_settings(tenant_id):
     """
-    Fetch SSO configurations for a specific tenant using a tenant-scoped token.
+    Fetch a tenant's SSO configurations (GET /team/resources/sso/v1/configurations, frontegg-tenant-id header).
 
-    Args:
-        tenant_id (str): The Frontegg tenant ID
-
-    Returns:
-        list: SSO configuration objects for this tenant
+    Group-to-role mappings are not inline; they come from .../configurations/{id}/groups.
     """
-    tenant_token = get_frontegg_tenant_token(tenant_id)
-    if not tenant_token:
+    configs = _frontegg_get("/team/resources/sso/v1/configurations", tenant_id=tenant_id)
+    if not isinstance(configs, list):
         return []
-
-    url = "https://api.frontegg.com/frontegg/team/resources/sso/v1/configurations"
-    headers = {
-        "Authorization": f"Bearer {tenant_token}",
-        "Content-Type": "application/json",
-        "frontegg-tenant-id": tenant_id,
-    }
-    response = api_request_with_retry("get", url, headers)
-    if not response:
-        logging.error(f"Failed to fetch SSO settings for tenant {tenant_id}")
-        return []
-
-    data = response.json()
-    return data if isinstance(data, list) else []
+    for config in configs:
+        if config.get("enabled") and "groups" not in config and config.get("id"):
+            groups = _frontegg_get(
+                f"/team/resources/sso/v1/configurations/{config['id']}/groups", tenant_id=tenant_id
+            )
+            config["groups"] = groups if isinstance(groups, list) else []
+    return configs
 
 
-def _decode_cert(cert: str) -> str:
-    """Return cert as a PEM string. Handles both raw PEM and base64-encoded DER."""
-    if not cert:
-        return ""
-    stripped = cert.strip()
-    if stripped.startswith("-----BEGIN"):
-        return stripped
-    try:
-        return base64.b64decode(stripped).decode("utf-8")
-    except Exception:
-        return stripped
-
-
-def _derive_entity_id(sso_url: str, fallback: str | None = None) -> str:
+def _derive_entity_id(sso_url, fallback=None):
     """Derive the IdP entity ID from the SSO URL for known providers.
 
-    Supports Okta, Azure AD, and JumpCloud. Falls back to `fallback` for
-    unrecognized providers.
+    Frontegg does not store the IdP entity ID, so this supports Okta, Azure AD and
+    JumpCloud, and falls back to `fallback` for anything else.
     """
-    from urllib.parse import urlparse
-    parsed = urlparse(sso_url)
-    host = parsed.hostname or ""
+    parsed = urlparse(sso_url or "")
+    host = (parsed.hostname or "").lower()
+    parts = [p for p in parsed.path.split("/") if p]
 
-    # Okta: https://<domain>.okta.com/app/<app_name>/<app_key>/sso/saml
-    #        -> http://www.okta.com/<app_key>
-    if host and (host == "okta.com" or host.endswith(".okta.com")):
-        parts = [p for p in parsed.path.split("/") if p]
+    # Okta: https://<domain>.okta.com/app/<app_name>/<app_key>/sso/saml -> http://www.okta.com/<app_key>
+    if host == "okta.com" or host.endswith(".okta.com"):
         if len(parts) >= 3 and parts[0] == "app":
             return f"http://www.okta.com/{parts[2]}"
 
-    # Azure AD: https://login.microsoftonline.com/<tenant_id>/saml2
-    #            -> https://sts.windows.net/<tenant_id>/
-    if host == "login.microsoftonline.com":
-        parts = [p for p in parsed.path.split("/") if p]
-        if parts:
-            return f"https://sts.windows.net/{parts[0]}/"
+    # Azure AD: https://login.microsoftonline.com/<tenant_id>/saml2 -> https://sts.windows.net/<tenant_id>/
+    if host == "login.microsoftonline.com" and parts:
+        return f"https://sts.windows.net/{parts[0]}/"
 
-    # JumpCloud: https://sso.jumpcloud.com/saml2/<app>
-    #             -> SP entity ID configured in Descope
+    # JumpCloud uses the SP entity ID as its IdP entity ID by default
     if host == "sso.jumpcloud.com":
         return os.getenv("FRONTEGG_SAML_SP_ENTITY_ID", "")
 
     return fallback or ""
 
 
+def _discover_oidc(authorization_endpoint):
+    """
+    Find the OIDC discovery document for an IdP given only its authorization endpoint.
+
+    Frontegg stores just the authorization endpoint (ssoEndpoint) for OIDC, while Descope
+    needs the issuer, token, userinfo and JWKS URLs. Try /.well-known/openid-configuration
+    on each parent path of the endpoint, longest first.
+    """
+    parsed = urlparse(authorization_endpoint or "")
+    if not parsed.scheme or not parsed.hostname:
+        return None
+    parts = [p for p in parsed.path.split("/") if p]
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    bases = ["/".join([origin] + parts[:n]) for n in range(len(parts) - 1, -1, -1)]
+    # Azure AD v2: /<tenant>/oauth2/v2.0/authorize -> discovery at /<tenant>/v2.0 (the parent
+    # /<tenant> doc is v1 and its issuer would not match v2 tokens)
+    if len(parts) >= 3 and parts[1:3] == ["oauth2", "v2.0"]:
+        bases.insert(0, f"{origin}/{parts[0]}/v2.0")
+    for base in bases:
+        try:
+            resp = requests.get(f"{base}/.well-known/openid-configuration", timeout=10)
+        except requests.RequestException:
+            continue
+        if resp.status_code == 200:
+            try:
+                return resp.json()
+            except ValueError:
+                continue
+    return None
+
+
 def write_sso(tenants, dry_run, verbose):
     """Migrate SSO settings (SAML and OIDC) for each Frontegg tenant to Descope."""
     migrated = 0
     failed = 0
-    skipped = 0
+    disabled = 0
+    unsupported = 0
 
     for tenant in tenants:
         tenant_id = tenant.get("tenantId") or tenant.get("id")
@@ -755,33 +614,22 @@ def write_sso(tenants, dry_run, verbose):
         if not tenant_id:
             continue
 
-        sso_configs = fetch_tenant_sso_settings(tenant_id)
-        if not sso_configs:
-            continue
-
-        for sso in sso_configs:
+        for sso in fetch_tenant_sso_settings(tenant_id):
             if not sso.get("enabled"):
-                skipped += 1
+                disabled += 1
                 continue
 
-            sso_type = sso.get("type", "").lower()
+            sso_type = (sso.get("type") or "").lower()
             domains = [d.get("domain") for d in sso.get("domains", []) if d.get("domain")]
-
-            default_roles = [
-                _role_id_to_name[role_id]
-                for role_id in sso.get("roleIds", [])
-                if role_id in _role_id_to_name
-            ]
+            default_roles = [_role_id_to_name[r] for r in sso.get("roleIds", []) if r in _role_id_to_name]
 
             role_mappings = []
             for group in sso.get("groups", []):
-                if not group.get("enabled"):
+                if group.get("enabled") is False or not group.get("group"):
                     continue
-                group_name = group.get("group")
                 for role_id in group.get("roleIds", []):
-                    role_name = _role_id_to_name.get(role_id)
-                    if role_name and group_name:
-                        role_mappings.append({"groups": [group_name], "roleName": role_name})
+                    if role_id in _role_id_to_name:
+                        role_mappings.append(RoleMapping(groups=[group["group"]], role_name=_role_id_to_name[role_id]))
 
             try:
                 if sso_type == "saml":
@@ -790,21 +638,21 @@ def write_sso(tenants, dry_run, verbose):
                         migrated += 1
                         continue
 
-                    saml_role_mappings = [RoleMapping(groups=[rm["groups"][0]], role_name=rm["roleName"]) for rm in role_mappings]
                     saml_settings = SSOSAMLSettings(
                         idp_url=sso.get("ssoEndpoint", ""),
                         idp_entity_id=_derive_entity_id(sso.get("ssoEndpoint", ""), sso.get("entityId")),
-                        idp_cert=_decode_cert(sso.get("publicCertificate", "")),
+                        idp_cert=decode_cert(sso.get("publicCertificate", "")),
                         attribute_mapping=AttributeMapping(
                             email="email",
                             given_name="firstName",
                             family_name="lastName",
                             group="groups",
                         ),
-                        role_mappings=saml_role_mappings,
+                        role_mappings=role_mappings,
                         default_sso_roles=default_roles,
                         sp_acs_url=os.getenv("FRONTEGG_SAML_SP_ACS_URL", ""),
                         sp_entity_id=os.getenv("FRONTEGG_SAML_SP_ENTITY_ID", ""),
+                        disable_sign_request=not sso.get("signRequest", False),
                     )
                     descope_client.mgmt.sso.configure_saml_settings(
                         tenant_id=tenant_id,
@@ -821,16 +669,23 @@ def write_sso(tenants, dry_run, verbose):
                         migrated += 1
                         continue
 
+                    discovery = _discover_oidc(sso.get("ssoEndpoint")) or {}
+                    if not discovery:
+                        logging.warning(
+                            f"No OIDC discovery document found for tenant {tenant_name}; "
+                            "issuer/token/userinfo/JWKS URLs must be completed in the Descope console"
+                        )
                     oidc_settings = SSOOIDCSettings(
                         name=tenant_name,
                         client_id=sso.get("oidcClientId") or sso.get("idpClientId", ""),
                         client_secret=sso.get("oidcSecret") or sso.get("idpClientSecret"),
-                        attribute_mapping=OIDCAttributeMapping(
-                            login_id="email",
-                            email="email",
-                            given_name="firstName",
-                            family_name="lastName",
-                        ),
+                        auth_url=discovery.get("authorization_endpoint") or sso.get("ssoEndpoint"),
+                        token_url=discovery.get("token_endpoint"),
+                        user_data_url=discovery.get("userinfo_endpoint"),
+                        jwks_url=discovery.get("jwks_uri"),
+                        issuer=discovery.get("issuer"),
+                        scope=["openid", "profile", "email"],
+                        attribute_mapping=default_oidc_attribute_mapping(),
                     )
                     descope_client.mgmt.sso.configure_oidc_settings(
                         tenant_id=tenant_id,
@@ -843,13 +698,13 @@ def write_sso(tenants, dry_run, verbose):
 
                 else:
                     logging.warning(f"Unknown SSO type '{sso_type}' for tenant {tenant_name}, skipping")
-                    skipped += 1
+                    unsupported += 1
 
             except Exception as e:
                 logging.error(f"Failed to migrate {sso_type.upper()} SSO for tenant {tenant_name}: {e}")
                 failed += 1
 
-    print(f"SSO: {migrated} migrated, {failed} failed, {skipped} skipped")
+    print(f"SSO: {migrated} migrated, {failed} failed, {disabled} disabled (skipped), {unsupported} unsupported type (skipped)")
 
 
 # --- Top-level Orchestrator ---
@@ -862,8 +717,8 @@ def migrate_frontegg(dry_run, verbose, with_sso=False):
     1. Tenants
     2. Permissions (populates _permission_id_to_name)
     3. Roles (needs permissions map; populates _role_id_to_name)
-    4. Users (needs both maps for role/tenant resolution)
-    5. SSO settings (optional, needs tenants)
+    4. SSO settings (optional; needs tenants and the role map)
+    5. Users (needs the role map for tenant roles)
 
     Args:
         dry_run (bool): If True, only print what would be done without making API calls
@@ -883,7 +738,7 @@ def migrate_frontegg(dry_run, verbose, with_sso=False):
     # 1. Tenants (must come first -- users reference tenant IDs)
     tenants = fetch_frontegg_tenants()
     print(f"Fetched {len(tenants)} tenants from Frontegg")
-    write_tenants(tenants, dry_run, verbose)
+    tenant_ids = write_tenants(tenants, dry_run, verbose)
 
     # 2. Permissions (must come before roles -- roles reference permission IDs)
     permissions = fetch_frontegg_permissions()
@@ -911,6 +766,7 @@ def migrate_frontegg(dry_run, verbose, with_sso=False):
     # 5. Users (after roles; needs _role_id_to_name for two-pass write)
     users = fetch_frontegg_users()
     print(f"Fetched {len(users)} users from Frontegg")
-    write_users(users, dry_run, verbose)
+    user_roles = fetch_frontegg_user_roles(users)
+    write_users(users, dry_run, verbose, user_roles=user_roles, tenant_ids=tenant_ids)
 
     print("Frontegg migration complete.")
