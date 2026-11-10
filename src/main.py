@@ -7,6 +7,7 @@ def main():
     dry_run = False
     verbose = False
     with_passwords = False
+    with_sso = False
     passwords_file_path = ""
     from_json = False
     json_file_path = ""
@@ -17,7 +18,7 @@ def main():
     )
     parser.add_argument(
         "provider",
-        choices=["firebase", "auth0", "cognito", "ping"],
+        choices=["firebase", "auth0", "cognito", "ping", "frontegg"],
         help="Specify the service to migrate from",
     )
     parser.add_argument("--dry-run", action="store_true", help="Enable dry run mode")
@@ -26,6 +27,11 @@ def main():
         "-v",
         action="store_true",
         help="Enable verbose printing for live runs and dry runs",
+    )
+    parser.add_argument(
+        "--with-sso-migration",
+        action="store_true",
+        help="Also migrate SSO settings (SAML/OIDC) for each tenant",
     )
 
     # Provider Specific Flags
@@ -52,11 +58,17 @@ def main():
     if args.verbose:
         verbose = True
 
+    SSO_SUPPORTED_PROVIDERS = {"frontegg", "auth0"}
+    if args.with_sso_migration:
+        if provider not in SSO_SUPPORTED_PROVIDERS:
+            print(f"Error: --with-sso-migration is not yet supported for '{provider}'. Supported providers: {', '.join(sorted(SSO_SUPPORTED_PROVIDERS))}")
+            return
+        with_sso = True
+
     # Auth0 Flags
     if args.with_passwords:
         passwords_file_path = args.with_passwords[0]
         with_passwords = True
-        # print(f"Running with passwords from file: {passwords_file_path}")
 
     if args.from_json:
         json_file_path = args.from_json[0]
@@ -71,7 +83,7 @@ def main():
     elif provider == "auth0":
         from auth0_migration import migrate_auth0
 
-        migrate_auth0(dry_run, verbose, passwords_file_path, json_file_path)
+        migrate_auth0(dry_run, verbose, passwords_file_path, json_file_path, with_sso=with_sso)
     elif provider == "cognito":
         from cognito_migration import migrate_cognito
 
@@ -80,6 +92,10 @@ def main():
         from ping_migration import migrate_pingone
 
         migrate_pingone(dry_run, verbose)
+    elif provider == "frontegg":
+        from frontegg_migration import migrate_frontegg
+
+        migrate_frontegg(dry_run, verbose, with_sso=with_sso)
     else:
         print("Invalid service specified.")
 
