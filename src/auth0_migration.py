@@ -15,6 +15,7 @@ from descope import (
 )
 from descope.management.sso_settings import (
     SSOSAMLSettings,
+    SSOSAMLSettingsByMetadata,
     SSOOIDCSettings,
     AttributeMapping as SSOAttributeMapping,
 )
@@ -628,6 +629,13 @@ def _add_sso_login_id(primary_login_id, sso_login_id):
             verified_email=u.get("verifiedEmail", False),
             verified_phone=u.get("verifiedPhone", False),
             additional_login_ids=additional,
+            # update() replaces the whole user: carry roles, tenants and SSO apps over or they are wiped
+            role_names=u.get("roleNames", []),
+            user_tenants=[
+                AssociatedTenant(t["tenantId"], t.get("roleNames", []))
+                for t in u.get("userTenants", [])
+            ],
+            sso_app_ids=u.get("ssoAppIds", []),
         )
         return True, ""
     except AuthException as error:
@@ -1044,7 +1052,7 @@ def _derive_idp_entity_id(url: str) -> str:
         if len(parts) >= 5 and parts[3] == "sso":
             return f"http://www.okta.com/{parts[2]}"
 
-    return url  # fall back to the URL itself (e.g. issuer field)
+    return ""  # unknown provider: callers fall back to the metadata URL or the issuer
 
 
 def fetch_auth0_connection(connection_id):
@@ -1127,27 +1135,50 @@ def write_sso(organizations, dry_run, verbose):
                         continue
 
                     fields_map = options.get("fieldsMap") or {}
-                    settings = SSOSAMLSettings(
-                        idp_url=options.get("signInEndpoint") or options.get("idpSignonUrl", ""),
-                        idp_entity_id=_derive_idp_entity_id(options.get("metadataUrl") or options.get("issuer", "")),
-                        idp_cert=decode_cert(options.get("signingCert", "")),
-                        attribute_mapping=SSOAttributeMapping(
-                            email=_first_attr(fields_map.get("email")) or "email",
-                            given_name=_first_attr(fields_map.get("given_name")) or "firstName",
-                            family_name=_first_attr(fields_map.get("family_name")) or "lastName",
-                            group="groups",
-                        ),
-                        role_mappings=[],
-                        default_sso_roles=[],
-                        sp_acs_url=os.getenv("AUTH0_SAML_SP_ACS_URL", ""),
-                        sp_entity_id=os.getenv("AUTH0_SAML_SP_ENTITY_ID", ""),
+                    attribute_mapping = SSOAttributeMapping(
+                        email=_first_attr(fields_map.get("email")) or "email",
+                        given_name=_first_attr(fields_map.get("given_name")) or "firstName",
+                        family_name=_first_attr(fields_map.get("family_name")) or "lastName",
+                        group="groups",
                     )
+                    sp_acs_url = os.getenv("AUTH0_SAML_SP_ACS_URL", "")
+                    sp_entity_id = os.getenv("AUTH0_SAML_SP_ENTITY_ID", "")
+                    sign_in_url = options.get("signInEndpoint") or options.get("idpSignonUrl", "")
+                    metadata_url = options.get("metadataUrl")
+                    entity_id = _derive_idp_entity_id(metadata_url) or _derive_idp_entity_id(sign_in_url)
 
-                    descope_client.mgmt.sso.configure_saml_settings(
-                        tenant_id=org_id,
-                        settings=settings,
-                        domains=domains,
-                    )
+                    if not entity_id and metadata_url:
+                        # Unknown IdP: let Descope read the real entity ID (and cert) from the metadata
+                        descope_client.mgmt.sso.configure_saml_settings_by_metadata(
+                            tenant_id=org_id,
+                            settings=SSOSAMLSettingsByMetadata(
+                                idp_metadata_url=metadata_url,
+                                attribute_mapping=attribute_mapping,
+                                sp_acs_url=sp_acs_url,
+                                sp_entity_id=sp_entity_id,
+                            ),
+                            domains=domains,
+                        )
+                    else:
+                        entity_id = entity_id or options.get("issuer", "")
+                        if not entity_id:
+                            logging.warning(
+                                f"No IdP entity ID found for org {org_name}; set it on the tenant's SSO settings in the Descope console"
+                            )
+                        descope_client.mgmt.sso.configure_saml_settings(
+                            tenant_id=org_id,
+                            settings=SSOSAMLSettings(
+                                idp_url=sign_in_url,
+                                idp_entity_id=entity_id,
+                                idp_cert=decode_cert(options.get("signingCert", "")),
+                                attribute_mapping=attribute_mapping,
+                                role_mappings=[],
+                                default_sso_roles=[],
+                                sp_acs_url=sp_acs_url,
+                                sp_entity_id=sp_entity_id,
+                            ),
+                            domains=domains,
+                        )
                     migrated += 1
                     if verbose:
                         logging.info(f"Created SAML SSO for org: {org_name}")

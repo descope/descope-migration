@@ -242,6 +242,7 @@ def write_tenants(tenants, dry_run, verbose):
                 print(f"  Domain: {domain}")
             continue
 
+        existing = None
         try:
             descope_client.mgmt.tenant.create(name=name, id=tenant_id)
             created_count += 1
@@ -250,22 +251,28 @@ def write_tenants(tenants, dry_run, verbose):
                 logging.info(f"Created tenant: {name} (id: {tenant_id})")
         except Exception as e:
             try:
-                descope_client.mgmt.tenant.load(tenant_id)
-                existing_count += 1
-                present_ids.add(tenant_id)
-                if verbose:
-                    logging.info(f"Tenant already exists, skipping: {name} (id: {tenant_id})")
+                existing = descope_client.mgmt.tenant.load(tenant_id)
             except Exception:
                 logging.error(f"Failed to create tenant {name} (id: {tenant_id}): {e}")
                 failed_count += 1
-            continue
+                continue
+            existing_count += 1
+            present_ids.add(tenant_id)
+            if verbose:
+                logging.info(f"Tenant already exists, updating domain only: {name} (id: {tenant_id})")
 
-        if domain:
+        if domain and not (existing and domain in (existing.get("selfProvisioningDomains") or [])):
             try:
+                # update() replaces the tenant: keep an existing tenant's name, domains and attributes
                 descope_client.mgmt.tenant.update(
                     id=tenant_id,
-                    name=name,
-                    self_provisioning_domains=[domain],
+                    name=existing.get("name", name) if existing else name,
+                    self_provisioning_domains=((existing or {}).get("selfProvisioningDomains") or []) + [domain],
+                    custom_attributes=(existing or {}).get("customAttributes") or None,
+                    enforce_sso=(existing or {}).get("enforceSSO", False),
+                    enforce_sso_exclusions=(existing or {}).get("enforceSSOExclusions"),
+                    federated_app_ids=(existing or {}).get("federatedAppIds"),
+                    disabled=(existing or {}).get("disabled", False),
                 )
             except Exception as e:
                 logging.warning(f"Failed to set domain {domain} for tenant {tenant_id}: {e}")
@@ -492,6 +499,8 @@ def write_users(users, dry_run, verbose, user_roles=None, tenant_ids=None):
                 picture=user.get("profilePictureUrl"),
                 user_tenants=user_tenants,
                 custom_attributes=custom_attributes,
+                # Locked in Frontegg -> created disabled, so they can't sign in after migration
+                status="disabled" if user.get("isLocked") else None,
             )
         )
 

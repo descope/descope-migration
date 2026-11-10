@@ -24,7 +24,7 @@ PERMS = [
 ROLES = [{"id": "r1", "key": "admin", "name": "Admin", "description": "", "tenantId": None, "permissions": ["p1", "p2"]}]
 TENANT_PAGES = [
     {"items": [{"tenantId": "t1", "name": "Acme"}], "_metadata": {"totalItems": 2, "totalPages": 2}},
-    {"items": [{"tenantId": "t2", "name": "Beta"}], "_metadata": {"totalItems": 2, "totalPages": 2}},
+    {"items": [{"tenantId": "t2", "name": "Beta", "domain": "beta.com"}], "_metadata": {"totalItems": 2, "totalPages": 2}},
 ]
 USERS = {
     "items": [
@@ -35,6 +35,7 @@ USERS = {
             "phoneNumber": "-",
             "verified": True,
             "metadata": '{"x":1}',
+            "isLocked": True,
             "tenants": [{"tenantId": "t1", "roles": []}],  # users v3 returns roles empty
         }
     ],
@@ -91,6 +92,11 @@ class FronteggMigrationTest(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.descope = mock.MagicMock()
         self.descope.mgmt.user.invite_batch.return_value = {"createdUsers": [{}], "failedUsers": []}
+        # t2 already exists in Descope with its own domain and settings
+        self.descope.mgmt.tenant.create.side_effect = lambda name, id: (_ for _ in ()).throw(Exception("exists")) if id == "t2" else None
+        self.descope.mgmt.tenant.load.return_value = {
+            "name": "Beta (Descope)", "selfProvisioningDomains": ["old.com"], "enforceSSO": True, "customAttributes": {"a": 1},
+        }
         p2 = mock.patch.object(fm, "descope_client", self.descope)
         p2.start()
         self.addCleanup(p2.stop)
@@ -119,6 +125,12 @@ class FronteggMigrationTest(unittest.TestCase):
         self.assertIsNone(user.phone)
         self.assertEqual([("t1", ["admin"])], [(t.tenant_id, t.role_names) for t in user.user_tenants])
         self.assertEqual('{"x":1}', user.custom_attributes["metadata"])
+        self.assertEqual("disabled", user.status)  # locked in Frontegg
+
+        # Existing tenant keeps its name/settings and gets the Frontegg domain merged in
+        upd = m.tenant.update.call_args.kwargs
+        self.assertEqual(("t2", "Beta (Descope)", ["old.com", "beta.com"], True, {"a": 1}),
+                         (upd["id"], upd["name"], upd["self_provisioning_domains"], upd["enforce_sso"], upd["custom_attributes"]))
 
         # Only the enabled SAML config is migrated, with derived entity ID, PEM cert and group mapping
         m.sso.configure_saml_settings.assert_called_once()
